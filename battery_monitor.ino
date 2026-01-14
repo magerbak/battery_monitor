@@ -82,15 +82,10 @@ const struct PSoC {
 // we expect to sleep for the balance of this interval.
 #ifdef TESTING
 #define HISTORY_SAMPLE_INTERVAL_SECS    (5)
-#define HISTORY_DURATION_SECS           (300)
 #else
-#define HISTORY_SAMPLE_INTERVAL_SECS    (60)
-#define HISTORY_DURATION_SECS           (7 * 24 * 60 * 60)
+#define HISTORY_SAMPLE_INTERVAL_SECS    (60 * 5)
 #endif
-#define HISTORY_NUM_DATA_POINTS         (HISTORY_DURATION_SECS / HISTORY_SAMPLE_INTERVAL_SECS)
-
-// Min data points to display represents 90mins of history
-#define MIN_DISPLAY_EXTENT              (5400 / HISTORY_SAMPLE_INTERVAL_SECS)
+#define HISTORY_NUM_DATA_POINTS         (4 * 24 * 12)
 
 #define DISPLAY_WIDTH   240
 #define DISPLAY_HEIGHT  135
@@ -121,6 +116,7 @@ enum Page {
     PAGE_END
 };
 
+// Make corresponding edits to g_optionsTable
 enum Options {
     OPT_SHOW_STATS,
     OPT_DYNAMIC_SCALE,
@@ -128,10 +124,11 @@ enum Options {
     OPT_BACK,
 };
 
+// Make corresponding edits to g_rangeOptionsTable
 enum HistRange {
     RANGE_3_HRS,
     RANGE_24_HRS,
-    RANGE_7_DAYS,
+    RANGE_4_DAYS,
     NUM_RANGE_OPTIONS
 };
 
@@ -214,10 +211,6 @@ DebouncedButton g_buttonD0(0, LOW);
 DebouncedButton g_buttonD1(1);
 DebouncedButton g_buttonD2(2);
 
-// History can be displayed over 1.5hr to HISTORY_DURATION_SECS. Measure this
-// in number of samples of history.
-double g_displayExtent = MIN_DISPLAY_EXTENT;
-
 // We are active when the user has interacted with us recently. Display is on
 // and we don't go to sleep until we're idle.
 bool g_bActive = true;
@@ -226,11 +219,17 @@ Page g_page = PAGE_SUMMARY;
 BatteryId g_selBattery = BAT2;
 HistOptions g_histOptions;
 
-const char* g_OptionsTable[OPT_BACK + 1] = {
+const char* g_optionsTable[OPT_BACK + 1] = {
     "Show Stats ",
     "Dynamic Scale ",
     "History ",
     "Back"
+};
+
+const char* g_rangeOptionsTable[NUM_RANGE_OPTIONS] = {
+    "3hrs",
+    "24hrs",
+    "4days",
 };
 
 SimpleTimer g_samplingTimer;
@@ -593,7 +592,9 @@ void drawHistoryCallback(void* user, const double* data, size_t len, size_t offs
     double scale_x = ctx->w / (double)(ctx->max_x - ctx->min_x);
     double scale_y = ctx->h / (double)(ctx->max_y - ctx->min_y);
 
-    int prev_idx = 0;
+    // This ensures we have seamless transition between first and second callback
+    // after the history has wrapped.
+    int prev_idx;
 
     for (unsigned int i = 0; i < len; i++) {
         if (offset + i < ctx->min_x) {
@@ -608,14 +609,16 @@ void drawHistoryCallback(void* user, const double* data, size_t len, size_t offs
 
         if (ctx->count == 0) {
             prev_idx = i;
-            ctx->prev_val = round((data[i] - ctx->min_y) * scale_y);
+            ctx->prev_val = val;
+        }
+        else {
+            prev_idx = i - 1;
         }
 
-        g_tft.drawLine(ctx->x + round((offset + prev_idx) * scale_x), ctx->y + ctx->h - ctx->prev_val,
-                       ctx->x + round((offset + i) * scale_x), ctx->y + ctx->h - val,
+        g_tft.drawLine(ctx->x + round((offset - ctx->min_x + prev_idx) * scale_x), ctx->y + ctx->h - ctx->prev_val,
+                       ctx->x + round((offset - ctx->min_x + i) * scale_x), ctx->y + ctx->h - val,
                        color);
 
-        prev_idx = i;
         ctx->prev_val = val;
         ctx->count++;
     }
@@ -635,13 +638,25 @@ void displayHistory(const Battery* bat) {
     uint16_t color = bat->getPSoCColor(psoc);
 
     // Figure out what range of history data we are displaying.
-    // Default to displaying entire history
     size_t minOffset = 0;
     size_t maxOffset = hist->getSize();
+    int stepx = 10;
 
-    // Now reduce it to the desired display extent so we can zoom in.
-    if (g_displayExtent < maxOffset) {
-        minOffset = maxOffset - g_displayExtent;
+    switch (g_histOptions.range) {
+        case RANGE_3_HRS:
+            minOffset = maxOffset - (maxOffset / 24);
+            stepx = DISPLAY_WIDTH / 12;
+            break;
+
+        case RANGE_24_HRS:
+            minOffset = maxOffset - (maxOffset / 4);
+            stepx = DISPLAY_WIDTH / 24;
+            break;
+
+        case RANGE_4_DAYS:
+            minOffset = 0;
+            stepx = DISPLAY_WIDTH / 8;
+            break;
     }
 
     // Calculate history statistics.
@@ -677,35 +692,30 @@ void displayHistory(const Battery* bat) {
     double scale_x = hist_window.w / (double)(hist_window.max_x - hist_window.min_x);
     double scale_y = hist_window.h / (double)(hist_window.max_y - hist_window.min_y);
 
-    // Vertical scale: we make a crude attempt to pick appropriate values for
-    // labels.
+    // Vertical scale: make a crude attempt to pick appropriate values for labels.
     int stepi = maxValue - minValue;
-    double step = (maxValue - minValue) / (stepi == 3) ? 3.0 : 4.0;
+    double stepy = (maxValue - minValue) / ((stepi == 3) ? 3.0 : 2.0);
     double v = maxValue;
 
     g_tft.setTextColor(ST77XX_WHITE);
     g_tft.setTextSize(1);
     while (v > minValue) {
-        int16_t val = round(v - hist_window.min_y) * scale_y;
+        int16_t val = round((v - hist_window.min_y) * scale_y);
 
         // Label vertical scale under each line
-        drawJustifiedVal(v, 0, "", DISPLAY_WIDTH, hist_window.y + hist_window.h - val + 11, TXT_JUSTIFIED);
+        drawJustifiedVal(v, 1, "", DISPLAY_WIDTH, hist_window.y + hist_window.h - val + 11, TXT_JUSTIFIED);
         g_tft.drawFastHLine(0, hist_window.y + hist_window.h - val, DISPLAY_WIDTH, ST77XX_WHITE);
-        v -= step;
+        v -= stepy;
     }
     // Except for last line, which goes above.
-    drawJustifiedVal(v, 0, "", DISPLAY_WIDTH, DISPLAY_HEIGHT - 3, TXT_JUSTIFIED);
+    //drawJustifiedVal(v, 1, "", DISPLAY_WIDTH, DISPLAY_HEIGHT - 3, TXT_JUSTIFIED);
 
-    // Horizontal scale: MA! TODO, need a dynamic scale based on zoom
+    // Horizontal scale:
     g_tft.drawFastHLine(0, DISPLAY_HEIGHT - 3, DISPLAY_WIDTH, ST77XX_WHITE);
     int t;
-    for (t = 0; t < DISPLAY_WIDTH; t += 10) {
+    for (t = 0; t < DISPLAY_WIDTH; t += stepx) {
         g_tft.drawFastVLine(DISPLAY_WIDTH - t, DISPLAY_HEIGHT - 2, 2, ST77XX_WHITE);
     }
-    //for (t = 0; t < hist->getSize(); t += 10) {
-    //    g_tft.drawFastVLine(DISPLAY_WIDTH - round(t * DISPLAY_WIDTH / hist->getSize()),
-    //                        DISPLAY_HEIGHT - 2, 2, ST77XX_WHITE);
-    //}
 
     g_tft.setTextSize(2);
     g_tft.setTextColor(color);
@@ -733,8 +743,7 @@ void displayHistory(const Battery* bat) {
     g_tft.setTextColor(ST77XX_WHITE);
     g_tft.setTextSize(2);
     g_tft.setCursor(0, DISPLAY_HEIGHT - 3 - 16);
-    drawJustifiedVal(g_displayExtent * HISTORY_SAMPLE_INTERVAL_SECS / 3600.0, 1, "hrs", 0, DISPLAY_HEIGHT - 3,
-                     TXT_JUSTIFIED);
+    drawJustifiedText(g_rangeOptionsTable[g_histOptions.range], 0, DISPLAY_HEIGHT - 3, TXT_JUSTIFIED);
 
     // Draw history data
     hist->forEachData(drawHistoryCallback, &hist_window);
@@ -774,14 +783,13 @@ void displayOptions() {
     g_tft.setTextSize(2);
     g_tft.setCursor(0, 0);
 
-    g_tft.print(g_OptionsTable[OPT_SHOW_STATS]);
+    g_tft.print(g_optionsTable[OPT_SHOW_STATS]);
     g_tft.println(g_histOptions.bShowStats ? "Yes" : "No");
-    g_tft.print(g_OptionsTable[OPT_DYNAMIC_SCALE]);
+    g_tft.print(g_optionsTable[OPT_DYNAMIC_SCALE]);
     g_tft.println(g_histOptions.bDynamicScale ? "Yes" : "No");
-    g_tft.print(g_OptionsTable[OPT_RANGE]);
-    g_tft.println(g_histOptions.range == RANGE_3_HRS ? "3hrs" :
-                  g_histOptions.range == RANGE_24_HRS ? "24hrs" : "7days");
-    g_tft.print(g_OptionsTable[OPT_BACK]);
+    g_tft.print(g_optionsTable[OPT_RANGE]);
+    g_tft.println(g_rangeOptionsTable[g_histOptions.range]);
+    g_tft.print(g_optionsTable[OPT_BACK]);
 
     int16_t y = 16 * g_histOptions.cursor;
     g_tft.drawRect(0, y, DISPLAY_WIDTH, 15, ST77XX_WHITE);
