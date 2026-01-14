@@ -98,6 +98,12 @@ const struct PSoC {
 // Use dedicated hardware SPI pins
 Adafruit_ST7789 g_tft = Adafruit_ST7789(TFT_CS, TFT_DC, TFT_RST);
 
+enum BatteryId {
+    BAT1,
+    BAT2,
+    NUM_BATTERIES
+};
+
 enum Event {
     EVT_NONE,
     EVT_D0_PRESS,
@@ -111,13 +117,22 @@ enum Event {
 enum Page {
     PAGE_SUMMARY,
     PAGE_HISTORY,
+    PAGE_OPTIONS,
     PAGE_END
 };
 
-enum BatteryId {
-    BAT1,
-    BAT2,
-    NUM_BATTERIES
+enum Options {
+    OPT_SHOW_STATS,
+    OPT_DYNAMIC_SCALE,
+    OPT_RANGE,
+    OPT_BACK,
+};
+
+enum HistRange {
+    RANGE_3_HRS,
+    RANGE_24_HRS,
+    RANGE_7_DAYS,
+    NUM_RANGE_OPTIONS
 };
 
 enum TextLayout {
@@ -157,6 +172,13 @@ struct HistStatsContext {
     int count = 0;
 };
 
+struct HistOptions {
+    int cursor = OPT_SHOW_STATS;
+
+    bool bShowStats = true;
+    bool bDynamicScale = true;
+    HistRange range = RANGE_3_HRS;
+};
 
 class Battery {
 public:
@@ -202,6 +224,14 @@ bool g_bActive = true;
 uint32_t g_lastActive = 0;
 Page g_page = PAGE_SUMMARY;
 BatteryId g_selBattery = BAT2;
+HistOptions g_histOptions;
+
+const char* g_OptionsTable[OPT_BACK + 1] = {
+    "Show Stats ",
+    "Dynamic Scale ",
+    "History ",
+    "Back"
+};
 
 SimpleTimer g_samplingTimer;
 SimpleTimer g_updateTimer;
@@ -273,20 +303,21 @@ void loop() {
 
     // Poll buttons and drive UI("(
     if (g_buttonD0.updateState()) {
-        Serial.println("d0");
+        g_lastActive = t;
         handleButtonEvents(g_buttonD0.isPressed() ? EVT_D0_PRESS : EVT_D0_RELEASE);
     }
     if (g_buttonD1.updateState()) {
-        Serial.println("d1");
+        g_lastActive = t;
         handleButtonEvents(g_buttonD1.isPressed() ? EVT_D1_PRESS : EVT_D1_RELEASE);
     }
     if (g_buttonD2.updateState()) {
-        Serial.println("d2");
+        g_lastActive = t;
         handleButtonEvents(g_buttonD2.isPressed() ? EVT_D2_PRESS : EVT_D2_RELEASE);
     }
 
     if (t - g_lastActive > IDLE_TIMEOUT_SECS) {
         // Sleep
+        Serial.println("Sleep");
     }
 }
 
@@ -294,6 +325,7 @@ void handleButtonEvents(Event e) {
     // D0 cycles selecting starter, house battery.
     // D1 toggle between summary and history
     // D2 option menu (display stats on/off, dynamic scale on/off, 3hr/24hr/7day history, back).
+
     switch (g_page) {
         case PAGE_SUMMARY:
             switch (e) {
@@ -323,7 +355,53 @@ void handleButtonEvents(Event e) {
                     break;
 
                 case EVT_D2_PRESS:
-                    // MA! TODO: Options menu
+                    g_histOptions.cursor = OPT_SHOW_STATS;
+                    g_page = PAGE_OPTIONS;
+                    break;
+
+                default:
+                    return;
+            }
+            break;
+
+        case PAGE_OPTIONS:
+            switch (e) {
+                case EVT_D0_PRESS:
+                    if (g_histOptions.cursor > 0) {
+                        g_histOptions.cursor--;
+                    }
+                    break;
+
+                case EVT_D1_PRESS:
+                    if (g_histOptions.cursor < OPT_BACK) {
+                        g_histOptions.cursor++;
+                    }
+                    break;
+
+                case EVT_D2_PRESS:
+                    switch (g_histOptions.cursor) {
+                        case OPT_SHOW_STATS:
+                            g_histOptions.bShowStats = !g_histOptions.bShowStats;
+                            break;
+
+                        case OPT_DYNAMIC_SCALE:
+                            g_histOptions.bDynamicScale = !g_histOptions.bDynamicScale;
+                            break;
+
+                        case OPT_RANGE:
+                            {
+                                int r = g_histOptions.range;
+                                if (++r == HistRange::NUM_RANGE_OPTIONS) {
+                                    r = 0;
+                                }
+                                g_histOptions.range = (HistRange)r;
+                            }
+                            break;
+
+                        case OPT_BACK:
+                            g_page = PAGE_HISTORY;
+                            break;
+                    }
                     break;
 
                 default:
@@ -572,30 +650,51 @@ void displayHistory(const Battery* bat) {
     hist_stats.size = hist->getSize();
     hist->forEachData(statsHistoryCallback, &hist_stats);
 
+    // Figure out what vertical range of data we are displaying.
+    double minValue = MIN_VOLTAGE;
+    double maxValue = MAX_VOLTAGE;
+    if (g_histOptions.bDynamicScale) {
+        // Round min/max to next integer
+        minValue = floor(hist_stats.min);
+        if (minValue < MIN_VOLTAGE) {
+            minValue = MIN_VOLTAGE;
+        }
+        maxValue = ceil(hist_stats.max);
+        if (maxValue <= minValue) {
+            maxValue = minValue + 1.0;
+        }
+    }
+
     hist_window.x = 0;
     hist_window.y = 0;
     hist_window.w = DISPLAY_WIDTH;
     hist_window.h = DISPLAY_HEIGHT - 3;
     hist_window.min_x = minOffset;
-    hist_window.min_y = MIN_VOLTAGE;
+    hist_window.min_y = minValue;
     hist_window.max_x = maxOffset;
-    hist_window.max_y = MAX_VOLTAGE;
+    hist_window.max_y = maxValue;
 
     double scale_x = hist_window.w / (double)(hist_window.max_x - hist_window.min_x);
     double scale_y = hist_window.h / (double)(hist_window.max_y - hist_window.min_y);
 
-    // Vertical scale: horizontal line every volt
-    double v = MAX_VOLTAGE;
+    // Vertical scale: we make a crude attempt to pick appropriate values for
+    // labels.
+    int stepi = maxValue - minValue;
+    double step = (maxValue - minValue) / (stepi == 3) ? 3.0 : 4.0;
+    double v = maxValue;
+
     g_tft.setTextColor(ST77XX_WHITE);
     g_tft.setTextSize(1);
-    while (v > MIN_VOLTAGE) {
+    while (v > minValue) {
         int16_t val = round(v - hist_window.min_y) * scale_y;
 
-        drawJustifiedVal(v, 0, "", DISPLAY_WIDTH, hist_window.y + hist_window.h - val, TXT_JUSTIFIED);
+        // Label vertical scale under each line
+        drawJustifiedVal(v, 0, "", DISPLAY_WIDTH, hist_window.y + hist_window.h - val + 11, TXT_JUSTIFIED);
         g_tft.drawFastHLine(0, hist_window.y + hist_window.h - val, DISPLAY_WIDTH, ST77XX_WHITE);
-        v -= 1.0;
+        v -= step;
     }
-    drawJustifiedVal(v, 0, "", DISPLAY_WIDTH, DISPLAY_HEIGHT - 4, TXT_JUSTIFIED);
+    // Except for last line, which goes above.
+    drawJustifiedVal(v, 0, "", DISPLAY_WIDTH, DISPLAY_HEIGHT - 3, TXT_JUSTIFIED);
 
     // Horizontal scale: MA! TODO, need a dynamic scale based on zoom
     g_tft.drawFastHLine(0, DISPLAY_HEIGHT - 3, DISPLAY_WIDTH, ST77XX_WHITE);
@@ -609,8 +708,6 @@ void displayHistory(const Battery* bat) {
     //}
 
     g_tft.setTextSize(2);
-
-    // Stats at top-left
     g_tft.setTextColor(color);
     g_tft.setCursor(0, 1);
     g_tft.print(bat->getName());
@@ -620,15 +717,18 @@ void displayHistory(const Battery* bat) {
     g_tft.print(psoc, 0);
     g_tft.println("%");
 
-    g_tft.setTextColor(ST77XX_CYAN);
-    g_tft.print("Max ");
-    g_tft.println(hist_stats.max, 2);
+    if (g_histOptions.bShowStats) {
+        // Stats at top-left
+        g_tft.setTextColor(ST77XX_CYAN);
+        g_tft.print("Max ");
+        g_tft.println(hist_stats.max, 2);
 
-    g_tft.print("Avg ");
-    g_tft.println(hist_stats.avg, 2);
+        g_tft.print("Avg ");
+        g_tft.println(hist_stats.avg, 2);
 
-    g_tft.print("Min ");
-    g_tft.println(hist_stats.min, 2);
+        g_tft.print("Min ");
+        g_tft.println(hist_stats.min, 2);
+    }
 
     g_tft.setTextColor(ST77XX_WHITE);
     g_tft.setTextSize(2);
@@ -666,6 +766,27 @@ void displaySummary() {
     drawBatterySummary(&g_batteries[BAT2], DISPLAY_HEIGHT / 2);
 }
 
+void displayOptions() {
+    g_tft.setTextWrap(false);
+    g_tft.fillScreen(ST77XX_BLACK);
+
+    g_tft.setTextColor(ST77XX_WHITE);
+    g_tft.setTextSize(2);
+    g_tft.setCursor(0, 0);
+
+    g_tft.print(g_OptionsTable[OPT_SHOW_STATS]);
+    g_tft.println(g_histOptions.bShowStats ? "Yes" : "No");
+    g_tft.print(g_OptionsTable[OPT_DYNAMIC_SCALE]);
+    g_tft.println(g_histOptions.bDynamicScale ? "Yes" : "No");
+    g_tft.print(g_OptionsTable[OPT_RANGE]);
+    g_tft.println(g_histOptions.range == RANGE_3_HRS ? "3hrs" :
+                  g_histOptions.range == RANGE_24_HRS ? "24hrs" : "7days");
+    g_tft.print(g_OptionsTable[OPT_BACK]);
+
+    int16_t y = 16 * g_histOptions.cursor;
+    g_tft.drawRect(0, y, DISPLAY_WIDTH, 15, ST77XX_WHITE);
+}
+
 void displaySplashScreen() {
     g_tft.setTextWrap(false);
     g_tft.fillScreen(ST77XX_BLACK);
@@ -686,6 +807,10 @@ void displayUpdate() {
 
         case PAGE_HISTORY:
             displayHistory(&g_batteries[g_selBattery]);
+            break;
+
+        case PAGE_OPTIONS:
+            displayOptions();
             break;
     }
 }
