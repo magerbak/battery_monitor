@@ -18,24 +18,13 @@ public:
     typedef void (*Callback)(void* user, const T* data, size_t len, size_t offset);
 
     AvgDataHistory() = default;
-    ~AvgDataHistory()
-    {
-        if (m_data) {
-            delete [] m_data;
-            m_data = nullptr;
-        }
-        m_len = 0;
+    ~AvgDataHistory() = default;
 
-        reset();
-    }
-
-    void begin(size_t length)
+    void begin(T* data, size_t length, int avgCount)
     {
-        if (m_data){
-            delete [] m_data;
-        }
-        m_data = new T[length];
+        m_data = data;
         m_len = length;
+        m_avgCount = avgCount;
 
         reset();
     }
@@ -46,40 +35,39 @@ public:
         m_bWrapped = false;
 
         m_accum = 0;
+        m_avg = 0;
         m_count = 0;
     }
 
-    void updateData(T t)
+    // Continuously calculates a data average. When the average is updated returns true.
+    bool updateData(T t)
     {
         m_accum += t;
-        m_count++;
+
+        // When we have accumulated enough samples, calculate the average and
+        // start again.
+        if (++m_count >= m_avgCount) {
+            m_avg = m_accum / m_avgCount;
+            m_accum = 0;
+            m_count = 0;
+            return true;
+        }
+        return false;
     }
 
-    void updateHistory() 
+    // Store the latest average in the circular buffer.
+    void updateHistory()
     {
-        m_data[m_offset] = m_accum / (m_count == 0 ? 1 : m_count);
-        m_accum = 0;
-        m_count = 0;
+        m_data[m_offset] = m_avg;
 
         if (++m_offset == m_len) {
+            Serial.println("Wrap");
             m_bWrapped = true;
             m_offset = 0;
         }
     }
 
-    T getLastData() const
-    {
-        if (m_offset > 0) {
-            return m_data[m_offset - 1];
-        }
-
-        if (m_bWrapped) {
-            return m_data[m_len - 1];
-        } else {
-            // No valid data. This could assert or throw an exception.
-            return 0;
-        }
-    }
+    T getLatestData() const { return m_avg; }
 
     // Pass data history to callback from oldest to latest.
     void forEachData(Callback callback, void* user) const
@@ -108,5 +96,7 @@ private:
     bool m_bWrapped = false;
 
     int m_count = 0;
+    int m_avgCount = 0;
     T m_accum = 0;
+    T m_avg = 0;
 };

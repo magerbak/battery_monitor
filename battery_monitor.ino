@@ -1,5 +1,19 @@
 /**************************************************************************
-  Monitors analog voltage on A0 and displays a history of recorded data.
+  Records a 4 day history of battery voltage on two analog pins.
+
+  At initial startup or when woken with a button-press, displays a summary of
+  current battery voltages.
+
+  D1 button toggles display of battery history. From the history page, D0 toggles
+  between BAT1 and BAT2. D2 enters and options menu.
+
+  After a specified idle interval, enters deep sleep and then periodically wakes
+  up, samples voltage and then returns to deep sleep.
+
+  Data preserved between sleep cycles is located in RTC memory (limited to 8KB) which
+  limits length of history.
+
+  Average power draw from a 13v power source when idle is xx mA (xx W).
 
   Works with the Adafruit ESP32-S3 Reverse TFT Feather
     ----> https://www.adafruit.com/products/5691
@@ -17,6 +31,10 @@
 #include "simple_timer.h"
 #include "avg_data_history.h"
 
+#define BUTTON_D0_PIN       0
+#define BUTTON_D1_PIN       1
+#define BUTTON_D2_PIN       2
+
 #define BAT1_ADC_PIN         A1
 #define BAT2_ADC_PIN         A0
 
@@ -27,8 +45,10 @@
 // Percent State of Charge table for a typical 12v AGM battery
 // Ref: https://lifelinebatteries.com/wp-content/uploads/2015/12/6-0101G_Lifeline_Technical_Manual.pdf
 //
-// Adjust the values below based on specific battery chemistry and model. May need
-// different tables for each battery.
+// Adjust the values below based on specific battery chemistry and model.
+//
+// TODO: May need different tables for each battery (add pointer to table in
+// battery object)
 const struct PSoC {
     double psoc;
     double v;
@@ -53,7 +73,6 @@ const struct PSoC {
 #define YELLOW_PSOC     50.0
 #define RED_PSOC        0.0
 
-
 // Adjust values to measured resistance of specific resistors in your circuit.
 //
 // TODO. May need different tables for each battery.
@@ -71,8 +90,6 @@ const struct PSoC {
 #define DIVIDER_R1      200.4   // Nominally 200K Ohms
 #define DIVIDER_R2      46.3    // Nominally 47K Ohms
 
-#define IDLE_TIMEOUT_SECS       (5 * 60)
-
 // For each average sample in history we average data samples every INTER_SAMPLE_INTERVAL_MS
 // for HISTORY_AVG_INTERVAL_MS.
 #define INTER_SAMPLE_INTERVAL_MS    100
@@ -81,11 +98,14 @@ const struct PSoC {
 // Every HISTORY_SAMPLE_INTERVAL_SECS we record an averaged sample. When idle,
 // we expect to sleep for the balance of this interval.
 #ifdef TESTING
-#define HISTORY_SAMPLE_INTERVAL_SECS    (5)
+#define HISTORY_SAMPLE_INTERVAL_SECS    (15)
 #else
-#define HISTORY_SAMPLE_INTERVAL_SECS    (60 * 5)
+#define HISTORY_SAMPLE_INTERVAL_SECS    (5 * 60)
 #endif
-#define HISTORY_NUM_DATA_POINTS         (4 * 24 * 12)
+#define HISTORY_NUM_DATA_POINTS         (2 * 24 * 12)
+
+#define IDLE_TIMEOUT_MS                 (1 * 60 * 1000)
+
 
 #define DISPLAY_WIDTH   240
 #define DISPLAY_HEIGHT  135
@@ -110,6 +130,7 @@ enum Event {
 };
 
 enum Page {
+    PAGE_NONE,
     PAGE_SUMMARY,
     PAGE_HISTORY,
     PAGE_OPTIONS,
@@ -182,42 +203,26 @@ public:
     Battery() = default;
     ~Battery() = default;
 
-    void begin(const char* name, int pin, size_t histLen);
+    void begin(const char* name, int pin, float* histData, size_t histLen, int avgCount);
 
-    void updateVoltageData();
+    bool updateVoltageData();
     void updateVoltageHistory();
 
     const char* getName() const { return m_pName; }
-    double getVoltage()const { return m_voltage; }
-    double getPSoC() const { return m_psoc; }
-    const AvgDataHistory<double>* getHistory() const { return &m_history; }
+    float getVoltage() const { return m_history.getLatestData(); }
+    const AvgDataHistory<float>* getHistory() const { return &m_history; }
 
-    static double calcPSoC(double voltage);
-    static uint16_t getPSoCColor(double psoc);
+    static float calcPSoC(float voltage);
+    static uint16_t getPSoCColor(float psoc);
 
 private:
-    static double readVoltage(int pin);
+    static float readVoltage(int pin);
 
     const char* m_pName = nullptr;
     int m_pin = 0;
 
-    double m_voltage = 0.0;
-    double m_psoc = 0.0;
-    AvgDataHistory<double> m_history;
+    AvgDataHistory<float> m_history;
 };
-
-// UI buttons. On the Adafruit ESP32-S3 reverse TFT feather, these are on pins 0, 1 and 2.
-DebouncedButton g_buttonD0(0, LOW);
-DebouncedButton g_buttonD1(1);
-DebouncedButton g_buttonD2(2);
-
-// We are active when the user has interacted with us recently. Display is on
-// and we don't go to sleep until we're idle.
-bool g_bActive = true;
-uint32_t g_lastActive = 0;
-Page g_page = PAGE_SUMMARY;
-BatteryId g_selBattery = BAT2;
-HistOptions g_histOptions;
 
 const char* g_optionsTable[OPT_BACK + 1] = {
     "Show Stats ",
@@ -233,15 +238,33 @@ const char* g_rangeOptionsTable[NUM_RANGE_OPTIONS] = {
 };
 
 SimpleTimer g_samplingTimer;
-SimpleTimer g_updateTimer;
+SimpleTimer g_historyTimer;
 
-Battery g_batteries[NUM_BATTERIES];
+// UI buttons. On the Adafruit ESP32-S3 reverse TFT feather, these are on pins D0, D1 and D2.
+DebouncedButton g_buttonD0(BUTTON_D0_PIN, LOW);
+DebouncedButton g_buttonD1(BUTTON_D1_PIN);
+DebouncedButton g_buttonD2(BUTTON_D2_PIN);
+
+// We are active when the user has interacted with us recently. Display is on
+// and we don't go to sleep until we're idle.
+bool g_bActive = false;
+uint32_t g_lastActive = 0;
+
+// UI state preserved during deep sleeps
+RTC_DATA_ATTR Page g_page = PAGE_NONE;
+RTC_DATA_ATTR BatteryId g_selBattery = BAT2;
+RTC_DATA_ATTR HistOptions g_histOptions;
+
+RTC_DATA_ATTR float g_bat1History[HISTORY_NUM_DATA_POINTS];
+RTC_DATA_ATTR float g_bat2History[HISTORY_NUM_DATA_POINTS];
+
+// Battery state
+RTC_DATA_ATTR Battery g_batteries[NUM_BATTERIES];
 
 void handleButtonEvents(Event e);
 bool samplingCallback(void* user);
 bool updateCallback(void* user);
 
-void displaySplashScreen();
 void drawJustifiedText(const char* str, int x, int y, TextLayout fmt);
 void drawJustifiedVal(double val, int precision, const char* suffix, int x, int y, TextLayout fmt);
 
@@ -251,46 +274,58 @@ void drawHistoryCallback(void* user, const double* dataMin, const double* dataMa
                          size_t len, size_t offset);
 void displayHistory(const char* title, double val, const AvgDataHistory<double>* hist);
 
+void displaySplashScreen();
+
 void displayUpdate();
 
+////////////////////////////////////////////////////////////////////////////
 
 void setup(void) {
   Serial.begin(115200);
   delay(1000);
   Serial.println(F("Starting battery monitor"));
 
+  esp_sleep_wakeup_cause_t wakeup_reason = esp_sleep_get_wakeup_cause();
+
+  if (wakeup_reason == ESP_SLEEP_WAKEUP_UNDEFINED) {
+      // Cold boot (power loss or hard reset)
+      Serial.println("Cold boot");
+      g_bActive = true;
+      g_lastActive = millis();
+
+      g_batteries[BAT1].begin("Engine", BAT1_ADC_PIN, g_bat1History, HISTORY_NUM_DATA_POINTS,
+                              HISTORY_AVG_INTERVAL_MS / INTER_SAMPLE_INTERVAL_MS);
+      g_batteries[BAT2].begin("House",  BAT2_ADC_PIN, g_bat2History, HISTORY_NUM_DATA_POINTS,
+                              HISTORY_AVG_INTERVAL_MS / INTER_SAMPLE_INTERVAL_MS);
+  }
+  else if (wakeup_reason == ESP_SLEEP_WAKEUP_EXT1) {
+      // Button press. We're active but batteries don't need to be initialized.
+      Serial.println("Wake from buttonpress");
+      g_bActive = true;
+      g_lastActive = millis();
+  }
+  else {
+      // ESP_SLEEP_WAKEUP_TIMER
+      Serial.println("Wake from timer");
+      g_bActive = false;
+  }
+
   g_buttonD0.begin();
   g_buttonD1.begin();
   g_buttonD2.begin();
 
   g_samplingTimer.begin(nullptr, INTER_SAMPLE_INTERVAL_MS, samplingCallback);
-  g_updateTimer.begin(nullptr, HISTORY_AVG_INTERVAL_MS, updateCallback);
-
-  g_batteries[BAT1].begin("Engine", BAT1_ADC_PIN, HISTORY_NUM_DATA_POINTS);
-  g_batteries[BAT2].begin("House",  BAT2_ADC_PIN, HISTORY_NUM_DATA_POINTS);
+  // First sample is after initial averaging period. If we're active, subsequent
+  // period is set to HISTORY_SAMPLE_INTERVAL_SECS.
+  g_historyTimer.begin(&g_historyTimer, HISTORY_AVG_INTERVAL_MS, updateCallback);
 
   // ADC setup
   pinMode(BAT1_ADC_PIN, INPUT);
   pinMode(BAT2_ADC_PIN, INPUT);
 
-  // turn on backlite
-  pinMode(TFT_BACKLITE, OUTPUT);
-  digitalWrite(TFT_BACKLITE, HIGH);
-
-  // turn on the TFT / I2C power supply
-  pinMode(TFT_I2C_POWER, OUTPUT);
-  digitalWrite(TFT_I2C_POWER, HIGH);
-  delay(10);
-
-  // initialize TFT
-  g_tft.init(DISPLAY_HEIGHT, DISPLAY_WIDTH);
-  g_tft.setRotation(3);
-
-  displaySplashScreen();
-  delay(2000);
-  Serial.println(F("TFT Initialized"));
-
-  displayUpdate();
+  if (g_bActive) {
+      initDisplay();
+  }
 }
 
 void loop() {
@@ -298,34 +333,38 @@ void loop() {
 
     // Drive our timers
     g_samplingTimer.tick(t);
-    g_updateTimer.tick(t);
+    g_historyTimer.tick(t);
 
-    // Poll buttons and drive UI("(
+    // Poll buttons and drive UI
     if (g_buttonD0.updateState()) {
-        g_lastActive = t;
         handleButtonEvents(g_buttonD0.isPressed() ? EVT_D0_PRESS : EVT_D0_RELEASE);
     }
     if (g_buttonD1.updateState()) {
-        g_lastActive = t;
         handleButtonEvents(g_buttonD1.isPressed() ? EVT_D1_PRESS : EVT_D1_RELEASE);
     }
     if (g_buttonD2.updateState()) {
-        g_lastActive = t;
         handleButtonEvents(g_buttonD2.isPressed() ? EVT_D2_PRESS : EVT_D2_RELEASE);
     }
-
-    if (t - g_lastActive > IDLE_TIMEOUT_SECS) {
-        // Sleep
-        Serial.println("Sleep");
-    }
 }
+
+////////////////////////////////////////////////////////////////////////////
 
 void handleButtonEvents(Event e) {
     // D0 cycles selecting starter, house battery.
     // D1 toggle between summary and history
     // D2 option menu (display stats on/off, dynamic scale on/off, 3hr/24hr/7day history, back).
 
+    if (!g_bActive) {
+        g_bActive = true;
+        g_lastActive = millis();
+
+        initDisplay();
+    }
+
     switch (g_page) {
+        case PAGE_NONE:
+            return;
+
         case PAGE_SUMMARY:
             switch (e) {
                 case EVT_D1_PRESS:
@@ -415,43 +454,42 @@ void handleButtonEvents(Event e) {
 
 //////////////////////////////////////////////////////////////////////////////
 
-void Battery::begin(const char* name, int pin, size_t histLen) {
+void Battery::begin(const char* name, int pin, float* histData, size_t histLen, int avgCount) {
     m_pName = name;
     m_pin = pin;
 
-    m_history.begin(histLen);
+    m_history.begin(histData, histLen, avgCount);
 }
 
-void Battery::updateVoltageData() {
-    m_voltage = readVoltage(m_pin);
-    m_psoc = calcPSoC(m_voltage);
-    m_history.updateData(m_voltage);
+bool Battery::updateVoltageData() {
+    float v = readVoltage(m_pin);
+    return m_history.updateData(v);
 }
 
 void Battery::updateVoltageHistory() {
     m_history.updateHistory();
 }
 
-double Battery::readVoltage(int pin) {
+float Battery::readVoltage(int pin) {
     // Read 12-bit ADC
     int val = analogRead(pin);
     //Serial.println(val);
 
     // From empirical data, ADC value is approximately 1079/volt
-    double adcVoltage = (2.429 * val / 2621);
+    float adcVoltage = (2.429 * val / 2621);
     //Serial.println(adcVoltage, 2);
 
     // Based on resistor divider, calculate the true voltage.
-    double batteryVoltage = adcVoltage * (DIVIDER_R1 + DIVIDER_R2) / DIVIDER_R2;
+    float batteryVoltage = adcVoltage * (DIVIDER_R1 + DIVIDER_R2) / DIVIDER_R2;
     //Serial.println(batteryVoltage, 2);
 
     return batteryVoltage;
 }
 
-double Battery::calcPSoC(double voltage) {
+float Battery::calcPSoC(float voltage) {
     // Estimate Percent State of Charge based on battery voltage.
     size_t len = sizeof(g_psocTable) / sizeof(struct PSoC);
-    double psoc = g_psocTable[0].psoc;
+    float psoc = g_psocTable[0].psoc;
 
     for (auto i = 0; g_psocTable[i].v > 0.0; i++) {
         if (voltage > g_psocTable[i + 1].v) {
@@ -463,7 +501,7 @@ double Battery::calcPSoC(double voltage) {
     return 0.0;
 }
 
-uint16_t Battery::getPSoCColor(double psoc) {
+uint16_t Battery::getPSoCColor(float psoc) {
 
     if (psoc >= GREEN_PSOC) {
         return ST77XX_GREEN;
@@ -482,8 +520,15 @@ bool samplingCallback(void* user) {
 
     (void)user;
 
-    g_batteries[BAT1].updateVoltageData();
-    g_batteries[BAT2].updateVoltageData();
+    bool bDone1 = g_batteries[BAT1].updateVoltageData();
+    bool bDone2 = g_batteries[BAT2].updateVoltageData();
+
+    if (g_bActive && (bDone1 || bDone2)) {
+        if (g_page == PAGE_NONE) {
+            g_page = PAGE_SUMMARY;
+        }
+        displayUpdate();
+    }
 
     // Continue running
     return true;
@@ -491,15 +536,62 @@ bool samplingCallback(void* user) {
 
 bool updateCallback(void* user) {
 
-    (void)user;
+    SimpleTimer* pTimer = (SimpleTimer*)user;
 
+#ifdef TESTING
+    Serial.print("Update ");
+    Serial.println(g_batteries[BAT2].getVoltage(), 2);
+#endif
+
+    // Update the voltage history with the latest average.
     g_batteries[BAT1].updateVoltageHistory();
     g_batteries[BAT2].updateVoltageHistory();
 
-    displayUpdate();
+    uint32_t t = millis();
+    if (g_bActive == false || (t - g_lastActive) > IDLE_TIMEOUT_MS) {
+        g_bActive = false;
 
-    // Continue running
+        Serial.println("Sleep ");
+        delay(100);
+        // Deep sleep
+
+        // Wake up on button press of D1 or D2 (can't use D0 because it's active low
+        // on the the TFT reverse feather).
+        //esp_sleep_enable_ext1_wakeup_io(0x1ULL << BUTTON_D1_PIN |
+        //                                0x1ULL << BUTTON_D2_PIN,
+        //                                ESP_EXT1_WAKEUP_ANY_HIGH);
+
+        // We want to wake up every HISTORY_SAMPLE_INTERVAL_SECS and take a sample.
+        // However, we need to take account for the startup and averaging time
+        // to avoid a time drift.
+        esp_sleep_enable_timer_wakeup(1000ULL * (HISTORY_SAMPLE_INTERVAL_SECS * 1000 -
+                                                 (HISTORY_AVG_INTERVAL_MS + 1000)));
+        esp_deep_sleep_start();
+        // No return from this
+    }
+
+    pTimer->setInterval(HISTORY_SAMPLE_INTERVAL_SECS * 1000);
+    // Continue running (if we are still active)
     return true;
+}
+
+void initDisplay() {
+    // turn on backlite
+    pinMode(TFT_BACKLITE, OUTPUT);
+    digitalWrite(TFT_BACKLITE, HIGH);
+
+    // turn on the TFT / I2C power supply
+    pinMode(TFT_I2C_POWER, OUTPUT);
+    digitalWrite(TFT_I2C_POWER, HIGH);
+    delay(10);
+
+    // initialize TFT
+    g_tft.init(DISPLAY_HEIGHT, DISPLAY_WIDTH);
+    g_tft.setRotation(3);
+
+    Serial.println(F("TFT Initialized"));
+
+    displayUpdate();
 }
 
 // Helper function to print text using a calculated starting position based on
@@ -548,7 +640,7 @@ void drawJustifiedVal(double val, int precision, const char* suffix, int x, int 
 
 
 // Callback to calculate statistics of history data.
-void statsHistoryCallback(void* user, const double* data, size_t len, size_t offset) {
+void statsHistoryCallback(void* user, const float* data, size_t len, size_t offset) {
     HistStatsContext* ctx = (HistStatsContext *)user;
 
     for (unsigned int i = 0; i < len; i++) {
@@ -585,7 +677,7 @@ void statsHistoryCallback(void* user, const double* data, size_t len, size_t off
 // Callback to draw history data scaled to the display window defined in the
 // context structure. Note that if data points exceed range_x (in number) or
 // range_y (in value) then drawing will exceed the defined window.
-void drawHistoryCallback(void* user, const double* data, size_t len, size_t offset) {
+void drawHistoryCallback(void* user, const float* data, size_t len, size_t offset) {
     HistWindowContext* ctx = (HistWindowContext *)user;
 
     // Scale the number of samples to fit the display window.
@@ -628,12 +720,12 @@ void drawHistoryCallback(void* user, const double* data, size_t len, size_t offs
 void displayHistory(const Battery* bat) {
     struct HistStatsContext hist_stats;
     struct HistWindowContext hist_window;
-    const AvgDataHistory<double>* hist = bat->getHistory();
+    const AvgDataHistory<float>* hist = bat->getHistory();
 
     g_tft.setTextWrap(false);
     g_tft.fillScreen(ST77XX_BLACK);
 
-    double cv = hist->getLastData();
+    double cv = hist->getLatestData();
     double psoc = bat->calcPSoC(cv);
     uint16_t color = bat->getPSoCColor(psoc);
 
@@ -752,7 +844,7 @@ void displayHistory(const Battery* bat) {
 void drawBatterySummary(const Battery* bat, int16_t y0) {
     char buffer[32];
 
-    double v = bat->getHistory()->getLastData();
+    double v = bat->getHistory()->getLatestData();
     double psoc = bat->calcPSoC(v);
     uint16_t color = bat->getPSoCColor(psoc);
     int16_t w = round(DISPLAY_WIDTH * psoc / 100.0);
@@ -801,25 +893,31 @@ void displaySplashScreen() {
 
     g_tft.setTextColor(ST77XX_WHITE);
     g_tft.setTextSize(3);
-    g_tft.setCursor(0, 48);
+    g_tft.setCursor(10, 48);
     g_tft.print("Initializing");
 }
 
 // Redraw the display.
 void displayUpdate() {
 
-    switch (g_page) {
-        case PAGE_SUMMARY:
-            displaySummary();
-            break;
+    if (g_bActive) {
+        switch (g_page) {
+            case PAGE_NONE:
+                displaySplashScreen();
+                break;
 
-        case PAGE_HISTORY:
-            displayHistory(&g_batteries[g_selBattery]);
-            break;
+            case PAGE_SUMMARY:
+                displaySummary();
+                break;
 
-        case PAGE_OPTIONS:
-            displayOptions();
-            break;
+            case PAGE_HISTORY:
+                displayHistory(&g_batteries[g_selBattery]);
+                break;
+
+            case PAGE_OPTIONS:
+                displayOptions();
+                break;
+        }
     }
 }
 
