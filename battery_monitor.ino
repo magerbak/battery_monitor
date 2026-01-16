@@ -23,6 +23,8 @@
  **************************************************************************/
 #define TESTING
 
+#include "driver/rtc_io.h"   // For low level RTC config for deep sleep
+                             //
 #include <Adafruit_GFX.h>    // Core graphics library
 #include <Adafruit_ST7789.h> // Hardware-specific library for ST7789
 #include <SPI.h>
@@ -31,12 +33,12 @@
 #include "simple_timer.h"
 #include "avg_data_history.h"
 
-#define BUTTON_D0_PIN       0
-#define BUTTON_D1_PIN       1
-#define BUTTON_D2_PIN       2
+#define BUTTON_D0_PIN       GPIO_NUM_0
+#define BUTTON_D1_PIN       GPIO_NUM_1
+#define BUTTON_D2_PIN       GPIO_NUM_2
 
-#define BAT1_ADC_PIN         A1
-#define BAT2_ADC_PIN         A0
+#define BAT1_ADC_PIN        A1
+#define BAT2_ADC_PIN        A0
 
 // We assume we're monitoring a nominal 12v battery.
 #define MAX_VOLTAGE     15.0
@@ -310,6 +312,11 @@ void setup(void) {
       g_bActive = false;
   }
 
+  // Deconfigure RTC config of button pins during deep sleep
+  rtc_gpio_deinit(BUTTON_D1_PIN);
+  rtc_gpio_deinit(BUTTON_D2_PIN);
+
+
   g_buttonD0.begin();
   g_buttonD1.begin();
   g_buttonD2.begin();
@@ -557,9 +564,13 @@ bool updateCallback(void* user) {
 
         // Wake up on button press of D1 or D2 (can't use D0 because it's active low
         // on the the TFT reverse feather).
-        //esp_sleep_enable_ext1_wakeup_io(0x1ULL << BUTTON_D1_PIN |
-        //                                0x1ULL << BUTTON_D2_PIN,
-        //                                ESP_EXT1_WAKEUP_ANY_HIGH);
+        rtc_gpio_pullup_dis(BUTTON_D1_PIN);
+        rtc_gpio_pulldown_en(BUTTON_D1_PIN);
+        rtc_gpio_pullup_dis(BUTTON_D2_PIN);
+        rtc_gpio_pulldown_en(BUTTON_D2_PIN);
+        esp_sleep_enable_ext1_wakeup_io(BIT(BUTTON_D1_PIN) |
+                                        BIT(BUTTON_D2_PIN),
+                                        ESP_EXT1_WAKEUP_ANY_HIGH);
 
         // We want to wake up every HISTORY_SAMPLE_INTERVAL_SECS and take a sample.
         // However, we need to take account for the startup and averaging time
