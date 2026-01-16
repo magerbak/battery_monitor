@@ -30,6 +30,7 @@
 #include <SPI.h>
 
 #include "debounced_button.h"
+#include "battery.h"
 #include "simple_timer.h"
 #include "avg_data_history.h"
 
@@ -40,58 +41,6 @@
 #define BAT1_ADC_PIN        A1
 #define BAT2_ADC_PIN        A0
 
-// We assume we're monitoring a nominal 12v battery.
-#define MAX_VOLTAGE     15.0
-#define MIN_VOLTAGE     11.0
-
-// Percent State of Charge table for a typical 12v AGM battery
-// Ref: https://lifelinebatteries.com/wp-content/uploads/2015/12/6-0101G_Lifeline_Technical_Manual.pdf
-//
-// Adjust the values below based on specific battery chemistry and model.
-//
-// TODO: May need different tables for each battery (add pointer to table in
-// battery object)
-const struct PSoC {
-    double psoc;
-    double v;
-} g_psocTable[] = {
-    { 100, MAX_VOLTAGE },
-    { 100, 12.78 },
-    {  90, 12.66 },
-    {  80, 12.54 },
-    {  70, 12.42 },
-    {  60, 12.30 },
-    {  50, 12.18 },
-    {  40, 12.06 },
-    {  30, 11.94 },
-    {  20, 11.82 },
-    {  10, 11.70 },
-    {   0, 11.58 },
-    {   0, 0 },
-};
-
-// UI color coding
-#define GREEN_PSOC      70.0
-#define YELLOW_PSOC     50.0
-#define RED_PSOC        0.0
-
-// Adjust values to measured resistance of specific resistors in your circuit.
-//
-// TODO. May need different tables for each battery.
-//
-// 12v----
-//        |
-//        R1
-// A0-----|
-//        R2
-//        |
-// GND----
-//
-// We want ADC input to be less than 3.1v, which is about 20% of MAX_VOLTAGE.
-// R2 / (R1 + R2) = 18.8% is close.
-#define DIVIDER_R1      200.4   // Nominally 200K Ohms
-#define DIVIDER_R2      46.3    // Nominally 47K Ohms
-
 // For each average sample in history we average data samples every INTER_SAMPLE_INTERVAL_MS
 // for HISTORY_AVG_INTERVAL_MS.
 #define INTER_SAMPLE_INTERVAL_MS    100
@@ -100,20 +49,25 @@ const struct PSoC {
 // Every HISTORY_SAMPLE_INTERVAL_SECS we record an averaged sample. When idle,
 // we expect to sleep for the balance of this interval.
 #ifdef TESTING
-#define HISTORY_SAMPLE_INTERVAL_SECS    (15)
+    // For testing we pretend time has sped up 20x
+    #define HISTORY_SAMPLE_INTERVAL_SECS    (15)
+    #define IDLE_TIMEOUT_MS                 (1 * 60 * 1000)
 #else
-#define HISTORY_SAMPLE_INTERVAL_SECS    (5 * 60)
+    #define HISTORY_SAMPLE_INTERVAL_SECS    (5 * 60)
+    #define IDLE_TIMEOUT_MS                 (15 * 60 * 1000)
 #endif
+
+// 2 days, assuming sampling every 5mins.
+// This consumes 4608 bytes of the 8kB RTC memory
 #define HISTORY_NUM_DATA_POINTS         (2 * 24 * 12)
-
-#define IDLE_TIMEOUT_MS                 (1 * 60 * 1000)
-
 
 #define DISPLAY_WIDTH   240
 #define DISPLAY_HEIGHT  135
 
-// Use dedicated hardware SPI pins
-Adafruit_ST7789 g_tft = Adafruit_ST7789(TFT_CS, TFT_DC, TFT_RST);
+// UI color coding
+#define GREEN_PSOC      70.0
+#define YELLOW_PSOC     50.0
+#define RED_PSOC        0.0
 
 enum BatteryId {
     BAT1,
@@ -200,32 +154,6 @@ struct HistOptions {
     HistRange range = RANGE_3_HRS;
 };
 
-class Battery {
-public:
-    Battery() = default;
-    ~Battery() = default;
-
-    void begin(const char* name, int pin, float* histData, size_t histLen, int avgCount);
-
-    bool updateVoltageData();
-    void updateVoltageHistory();
-
-    const char* getName() const { return m_pName; }
-    float getVoltage() const { return m_history.getLatestData(); }
-    const AvgDataHistory<float>* getHistory() const { return &m_history; }
-
-    static float calcPSoC(float voltage);
-    static uint16_t getPSoCColor(float psoc);
-
-private:
-    static float readVoltage(int pin);
-
-    const char* m_pName = nullptr;
-    int m_pin = 0;
-
-    AvgDataHistory<float> m_history;
-};
-
 const char* g_optionsTable[OPT_BACK + 1] = {
     "Show Stats ",
     "Dynamic Scale ",
@@ -238,6 +166,9 @@ const char* g_rangeOptionsTable[NUM_RANGE_OPTIONS] = {
     "24hrs",
     "4days",
 };
+
+// Use dedicated hardware SPI pins
+Adafruit_ST7789 g_tft = Adafruit_ST7789(TFT_CS, TFT_DC, TFT_RST);
 
 SimpleTimer g_samplingTimer;
 SimpleTimer g_historyTimer;
@@ -267,6 +198,7 @@ void handleButtonEvents(Event e);
 bool samplingCallback(void* user);
 bool updateCallback(void* user);
 
+uint16_t getPSoCColor(float psoc);
 void drawJustifiedText(const char* str, int x, int y, TextLayout fmt);
 void drawJustifiedVal(double val, int precision, const char* suffix, int x, int y, TextLayout fmt);
 
@@ -459,70 +391,6 @@ void handleButtonEvents(Event e) {
 }
 
 
-//////////////////////////////////////////////////////////////////////////////
-
-void Battery::begin(const char* name, int pin, float* histData, size_t histLen, int avgCount) {
-    m_pName = name;
-    m_pin = pin;
-
-    m_history.begin(histData, histLen, avgCount);
-}
-
-bool Battery::updateVoltageData() {
-    float v = readVoltage(m_pin);
-    return m_history.updateData(v);
-}
-
-void Battery::updateVoltageHistory() {
-    m_history.updateHistory();
-}
-
-float Battery::readVoltage(int pin) {
-    // Read 12-bit ADC
-    int val = analogRead(pin);
-    //Serial.println(val);
-
-    // From empirical data, ADC value is approximately 1079/volt
-    float adcVoltage = (2.429 * val / 2621);
-    //Serial.println(adcVoltage, 2);
-
-    // Based on resistor divider, calculate the true voltage.
-    float batteryVoltage = adcVoltage * (DIVIDER_R1 + DIVIDER_R2) / DIVIDER_R2;
-    //Serial.println(batteryVoltage, 2);
-
-    return batteryVoltage;
-}
-
-float Battery::calcPSoC(float voltage) {
-    // Estimate Percent State of Charge based on battery voltage.
-    size_t len = sizeof(g_psocTable) / sizeof(struct PSoC);
-    float psoc = g_psocTable[0].psoc;
-
-    for (auto i = 0; g_psocTable[i].v > 0.0; i++) {
-        if (voltage > g_psocTable[i + 1].v) {
-            psoc = (voltage - g_psocTable[i + 1].v) / (g_psocTable[i].v - g_psocTable[i + 1].v) *
-                   (g_psocTable[i].psoc - g_psocTable[i + 1].psoc) + g_psocTable[i + 1].psoc;
-            return psoc;
-        }
-    }
-    return 0.0;
-}
-
-uint16_t Battery::getPSoCColor(float psoc) {
-
-    if (psoc >= GREEN_PSOC) {
-        return ST77XX_GREEN;
-    }
-    else if (psoc >= YELLOW_PSOC) {
-        return ST77XX_YELLOW;
-    }
-    else {
-        return ST77XX_RED;
-    }
-}
-
-//////////////////////////////////////////////////////////////////////////////
-
 bool samplingCallback(void* user) {
 
     (void)user;
@@ -603,6 +471,20 @@ void initDisplay() {
     Serial.println(F("TFT Initialized"));
 
     displayUpdate();
+}
+
+// Determine the UI color for a given percent state of charge
+uint16_t getPSoCColor(float psoc) {
+
+    if (psoc >= GREEN_PSOC) {
+        return ST77XX_GREEN;
+    }
+    else if (psoc >= YELLOW_PSOC) {
+        return ST77XX_YELLOW;
+    }
+    else {
+        return ST77XX_RED;
+    }
 }
 
 // Helper function to print text using a calculated starting position based on
@@ -707,7 +589,7 @@ void drawHistoryCallback(void* user, const float* data, size_t len, size_t offse
             break;;
         }
 
-        uint16_t color = Battery::getPSoCColor(Battery::calcPSoC(data[i]));
+        uint16_t color = getPSoCColor(Battery::calcPSoC(data[i]));
         int16_t val = round((data[i] - ctx->min_y) * scale_y);
 
         if (ctx->count == 0) {
@@ -738,7 +620,7 @@ void displayHistory(const Battery* bat) {
 
     double cv = hist->getLatestData();
     double psoc = bat->calcPSoC(cv);
-    uint16_t color = bat->getPSoCColor(psoc);
+    uint16_t color = getPSoCColor(psoc);
 
     // Figure out what range of history data we are displaying.
     size_t minOffset = 0;
@@ -857,7 +739,7 @@ void drawBatterySummary(const Battery* bat, int16_t y0) {
 
     double v = bat->getHistory()->getLatestData();
     double psoc = bat->calcPSoC(v);
-    uint16_t color = bat->getPSoCColor(psoc);
+    uint16_t color = getPSoCColor(psoc);
     int16_t w = round(DISPLAY_WIDTH * psoc / 100.0);
 
     g_tft.setTextColor(ST77XX_WHITE);
