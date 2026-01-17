@@ -22,7 +22,7 @@
 
   We are awake for ~6s every HISTORY_SAMPLE_INTERVAL_SECS. At 5mins, the awake
   ratio is 1.96%, so average current draw is:
-    0.0196*37.3 + (1-0.0196)*0.25 = ~0.976mA (12.7W)
+    0.0196*37.3 + (1-0.0196)*0.25 = ~0.976mA (12.7mW)
 
   Therefore average power draw from a nominal 12V battery is ~1mA.
 
