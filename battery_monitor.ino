@@ -1,27 +1,38 @@
 /**************************************************************************
-  Records a 4 day history of battery voltage on two analog pins.
+  Records a 2 day history of battery voltage on two analog pins.
+
+  Implemented for the Adafruit ESP32-S3 Reverse TFT Feather
+    ----> https://www.adafruit.com/products/5691
 
   At initial startup or when woken with a button-press, displays a summary of
   current battery voltages.
 
   D1 button toggles display of battery history. From the history page, D0 toggles
-  between BAT1 and BAT2. D2 enters and options menu.
+  between BAT1 and BAT2. D2 enters options menu.
 
   After a specified idle interval, enters deep sleep and then periodically wakes
   up, samples voltage and then returns to deep sleep.
 
   Data preserved between sleep cycles is located in RTC memory (limited to 8KB) which
-  limits length of history.
+  limits length of history (or sample rate).
 
-  Average power draw from a 13v power source when idle is xx mA (xx W).
+  13V current draw when active (display on) is 37.3mA (0.485 W).
+  13V current draw when awake and idle is 26.5mA (0.345 W).
+  13V current draw when in deep sleep is 0.25mA (0.00325 W).
 
-  Works with the Adafruit ESP32-S3 Reverse TFT Feather
-    ----> https://www.adafruit.com/products/5691
+  We are awake for ~6s every HISTORY_SAMPLE_INTERVAL_SECS. At 5mins, the awake
+  ratio is 1.96%, so average current draw is:
+    0.0196*37.3 + (1-0.0196)*0.25 = ~0.976mA (12.7W)
+
+  Therefore average power draw from a nominal 12V battery is ~1mA.
+
+  Deep sleep power could possibly be improved by shutting down more peripherals. It's
+  not immediately obvious how much already gets disabled by default.
 
   Uses the Adafruit GFX library and the ST7789 display driver.
 
  **************************************************************************/
-#define TESTING
+//#define TESTING
 
 #include "driver/rtc_io.h"   // For low level RTC config for deep sleep
                              //
@@ -101,11 +112,11 @@ enum Options {
     OPT_BACK,
 };
 
-// Make corresponding edits to g_rangeOptionsTable
+// Make corresponding edits to g_rangeOptionsTable and displayHistory()
 enum HistRange {
     RANGE_3_HRS,
     RANGE_24_HRS,
-    RANGE_4_DAYS,
+    RANGE_2_DAYS,
     NUM_RANGE_OPTIONS
 };
 
@@ -164,7 +175,7 @@ const char* g_optionsTable[OPT_BACK + 1] = {
 const char* g_rangeOptionsTable[NUM_RANGE_OPTIONS] = {
     "3hrs",
     "24hrs",
-    "4days",
+    "2days",
 };
 
 // Use dedicated hardware SPI pins
@@ -634,11 +645,11 @@ void displayHistory(const Battery* bat) {
             break;
 
         case RANGE_24_HRS:
-            minOffset = maxOffset - (maxOffset / 4);
+            minOffset = maxOffset - (maxOffset / 2);
             stepx = DISPLAY_WIDTH / 24;
             break;
 
-        case RANGE_4_DAYS:
+        case RANGE_2_DAYS:
             minOffset = 0;
             stepx = DISPLAY_WIDTH / 8;
             break;
