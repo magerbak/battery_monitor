@@ -16,18 +16,17 @@
   Data preserved between sleep cycles is located in RTC memory (limited to 8KB) which
   limits length of history (or sample rate).
 
-  13V current draw when active (display on) is 37.3mA (0.485 W).
-  13V current draw when awake and idle is 26.5mA (0.345 W).
-  13V current draw when in deep sleep is 0.25mA (0.00325 W).
+  With a nominal 12V battery, including a 12V to 5V converter:
+  * Current draw when active (display on) is 37.3mA (0.485 W).
+  * Current draw when awake and idle is 26.5mA (0.345 W).
+  * Current draw in deep sleep is 0.25mA (0.00325 W).
 
-  We are awake for ~6s every HISTORY_SAMPLE_INTERVAL_SECS. At 5mins, the awake
+  Wake time is approx. 6s every HISTORY_SAMPLE_INTERVAL_SECS. At 5mins, the awake
   ratio is 1.96%, so average current draw is:
-    0.0196*37.3 + (1-0.0196)*0.25 = ~0.976mA (12.7mW)
+    0.0196*37.3 + (1-0.0196)*0.25 = 0.976mA (12.7mW) ~= 1mA
 
-  Therefore average power draw from a nominal 12V battery is ~1mA.
-
-  Deep sleep power could possibly be improved by shutting down more peripherals. It's
-  not immediately obvious how much already gets disabled by default.
+  Deep sleep power could possibly be improved by shutting down more peripherals.
+  It's not immediately obvious how much already gets disabled by default.
 
   Uses the Adafruit GFX library and the ST7789 display driver.
 
@@ -35,7 +34,7 @@
 //#define TESTING
 
 #include "driver/rtc_io.h"   // For low level RTC config for deep sleep
-                             //
+
 #include <Adafruit_GFX.h>    // Core graphics library
 #include <Adafruit_ST7789.h> // Hardware-specific library for ST7789
 #include <SPI.h>
@@ -49,8 +48,8 @@
 #define BUTTON_D1_PIN       GPIO_NUM_1
 #define BUTTON_D2_PIN       GPIO_NUM_2
 
-#define BAT1_ADC_PIN        A1
-#define BAT2_ADC_PIN        A0
+#define BAT1_ADC_PIN        A0
+#define BAT2_ADC_PIN        A1
 
 // For each average sample in history we average data samples every INTER_SAMPLE_INTERVAL_MS
 // for HISTORY_AVG_INTERVAL_MS.
