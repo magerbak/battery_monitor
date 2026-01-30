@@ -24,23 +24,26 @@ const Battery::PSoC Battery::m_psocTable[] = {
     {   0, 0 },
 };
 
+// We want ADC input to be less than 3.1v, which is about 20% of MAX_VOLTAGE.
+// Using a voltage divider, the battery voltage will be scaled by R2 / (R1 + R2).
+//
+// BAT 12v--
+//         |
+//         R1
+// ADC-----|
+//         R2
+//         |
+// GND------
+//
+// Using R1 = 200k and R2 = 47k, R2 / (R1 + R2) = 18.8%.
+//
 // Adjust values to measured resistance of specific resistors in your circuit.
 //
 // TODO. May need different tables for each battery. Also R2/(R1+R2) should be passed
 // as a param to begin() instead of being hardcoded here.
 //
-// 12v----
-//        |
-//        R1
-// A0-----|
-//        R2
-//        |
-// GND----
-//
-// We want ADC input to be less than 3.1v, which is about 20% of MAX_VOLTAGE.
-// R2 / (R1 + R2) = 18.8% is close.
-#define DIVIDER_R1      200.4   // Nominally 200K Ohms
-#define DIVIDER_R2      46.3    // Nominally 47K Ohms
+#define DIVIDER_R1      200
+#define DIVIDER_R2      46.3
 
 
 void Battery::begin(const char* name, int pin, float* histData, size_t histLen, int avgCount) {
