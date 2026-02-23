@@ -34,7 +34,6 @@
 //#define TESTING
 
 #include "driver/rtc_io.h"   // For low level RTC config for deep sleep
-#include "esp_adc/adc_cali_scheme.h"
 
 #include <Adafruit_GFX.h>    // Core graphics library
 #include <Adafruit_ST7789.h> // Hardware-specific library for ST7789
@@ -52,7 +51,7 @@
 #define BAT1_ADC_PIN        A0
 #define BAT2_ADC_PIN        A1
 
-// For each average sample in history we average data samples every INTER_SAMPLE_INTERVAL_MS
+// For each sample in history we average data samples every INTER_SAMPLE_INTERVAL_MS
 // for HISTORY_AVG_INTERVAL_MS.
 #define INTER_SAMPLE_INTERVAL_MS    100
 #define HISTORY_AVG_INTERVAL_MS     5000
@@ -75,7 +74,7 @@
 #define DISPLAY_WIDTH   240
 #define DISPLAY_HEIGHT  135
 
-// UI color coding
+// UI color coding for percent state of charge above these values.
 #define GREEN_PSOC      70.0
 #define YELLOW_PSOC     50.0
 #define RED_PSOC        0.0
@@ -258,7 +257,6 @@ void setup(void) {
   // Deconfigure RTC config of button pins during deep sleep
   rtc_gpio_deinit(BUTTON_D1_PIN);
   rtc_gpio_deinit(BUTTON_D2_PIN);
-
 
   g_buttonD0.begin();
   g_buttonD1.begin();

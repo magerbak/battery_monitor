@@ -11,10 +11,12 @@ Initial screen is a summary display of both battery voltages.
 ![PXL_20260126_001109261](https://github.com/user-attachments/assets/11b304bd-0ffb-4584-96aa-58aee903571a)
 
 
-* D1 button toggles between Summary and Battery History page
+* After 15 minutes of no button activity, the device enters idle mode, switches off the display and enters deep sleep. It wakes up every 5 minutes, without enabling the display, to record another voltage sample and then returns to deep sleep.
+* While idle, the D1 or D2 buttons can be used to return to active mode and enable the display.
+* While active the D1 button toggles between Summary and Battery History page
 
 ### Battery History Page
-Displays voltage history over 3hrs, 24hrs or 2 days.
+Displays voltage history for a single battery over 3hrs, 24hrs or 2 days.
 
 ![PXL_20260117_213506372 PORTRAIT ORIGINAL](https://github.com/user-attachments/assets/7bc5ef19-2b25-4e54-b3f4-1460b4cc0b57)
 
@@ -26,13 +28,12 @@ Displays voltage history over 3hrs, 24hrs or 2 days.
   * History - cycles between 3hrs, 24hrs and 2 days of history (does not affect recorded data).
   * Back - exits the options menu.
 
-After 15 minutes of no button activity, the device enters deep sleep and then wakes up every 5 minutes, samples voltage and then returns to deep sleep.
-Each sample is an average of 50 analog readings taken over 5s to reduce noise.
+Samples are recorded every 5 minutes, with each sample being an average of 50 analog readings taken over 5s to reduce noise.
 
 Data preserved between sleep cycles is located in RTC memory (limited to 8KB) which limits length of history (or sample rate).
 
 ## Power Usage
-Power measurements were using a 13V power supply and included the ESP32-S3 Feather and a 12-5V buck converter
+Power measurements were using a 13V power supply and included the ESP32-S3 Feather, a 12-5V buck converter and resistor dividers for the ADC inputs.
 * Current draw when active (display on): 37.3mA (485mW).
 * Current draw when awake and idle (display off): 26.5mA (345mW).
 * Current draw in deep sleep: 0.25mA (3.25mW).
