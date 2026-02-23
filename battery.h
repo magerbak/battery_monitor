@@ -17,7 +17,7 @@ public:
     Battery() = default;
     ~Battery() = default;
 
-    void begin(const char* name, int pin, float* histData, size_t histLen, int avgCount);
+    void begin(const char* name, int pin, float r1, float r2, float* histData, size_t histLen, int avgCount);
 
     bool updateVoltageData();
     void updateVoltageHistory();
@@ -35,12 +35,13 @@ private:
         double v;
     };
 
-    static float readVoltage(int pin);
+    static float readVoltage(int pin, float scaleFactor);
 
     static const PSoC m_psocTable[];
 
     const char* m_pName = nullptr;
     int m_pin = 0;
+    float m_scaleFactor = 0.0;
 
     AvgDataHistory<float> m_history;
 };

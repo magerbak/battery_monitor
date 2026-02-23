@@ -79,6 +79,41 @@
 #define YELLOW_PSOC     50.0
 #define RED_PSOC        0.0
 
+// ADC voltage divider resistor values in kilo-ohms.
+//
+// We want ADC input to be less than 3.1V, which is about 20% of MAX_VOLTAGE.
+// Using a voltage divider, the battery voltage will be scaled by R2 / (R1 + R2).
+//
+// BAT 12v--
+//         |
+//         R1
+// ADC-----|----|
+//         R2   C1
+//         |    |
+// GND-----------
+//
+// Using R1 = 200k and R2 = 47k, R2 / (R1 + R2) = 18.8%.
+// C1 is a 100nF capacitor to smooth out noise.
+//
+// Note: The ESP32 ADC technically measures inputs in the 0-950mV range using an
+// internal VRef of 1100mV. Configuring the input pin to use 11dB attenuation this
+// range is expanded to 0-3100mV, although the raw input is non-linear above 2.5V.
+// We rely on the use of the ESP32 calibration and curve fitting APIs to
+// compensate for this, although we primarily care about accuracy in the 11-13V
+// range at the battery for determining state of charge, which corresponds to
+// 2-2.5V at the ADC using the current resistor values. In retrospect, using
+// 220k for R1 would have been a simpler choice.
+//
+// See the v4.4 doc for background, however the APIs have radically changed in
+// v.5.5. Fortunately, the Arduino analogReadMilliVolts() API takes care of all
+// these details for us.
+// https://docs.espressif.com/projects/esp-idf/en/v4.4.4/esp32s3/api-reference/peripherals/adc.html
+// https://docs.espressif.com/projects/esp-idf/en/v5.5.3/esp32s3/api-reference/peripherals/adc_calibration.html
+//
+// Adjust resistor values to measured resistance of specific resistors in your circuit.
+#define DIVIDER_R1      (100 + 101)
+#define DIVIDER_R2      46.3
+
 #define SERIAL_INIT_DELAY_MS    1000
 
 enum BatteryId {
@@ -239,9 +274,11 @@ void setup(void) {
       g_bActive = true;
       g_lastActive = millis();
 
-      g_batteries[BAT1].begin("Engine", BAT1_ADC_PIN, g_bat1History, HISTORY_NUM_DATA_POINTS,
+      g_batteries[BAT1].begin("Engine", BAT1_ADC_PIN, DIVIDER_R1, DIVIDER_R2,
+                              g_bat1History, HISTORY_NUM_DATA_POINTS,
                               HISTORY_AVG_INTERVAL_MS / INTER_SAMPLE_INTERVAL_MS);
-      g_batteries[BAT2].begin("House",  BAT2_ADC_PIN, g_bat2History, HISTORY_NUM_DATA_POINTS,
+      g_batteries[BAT2].begin("House",  BAT2_ADC_PIN, DIVIDER_R1, DIVIDER_R2,
+                              g_bat2History, HISTORY_NUM_DATA_POINTS,
                               HISTORY_AVG_INTERVAL_MS / INTER_SAMPLE_INTERVAL_MS);
   }
   else if (wakeup_reason == ESP_SLEEP_WAKEUP_EXT1) {
