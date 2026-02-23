@@ -1,4 +1,5 @@
 #include <Arduino.h>
+
 #include "battery.h"
 
 // Percent State of Charge table for a typical 12v AGM battery
@@ -30,20 +31,25 @@ const Battery::PSoC Battery::m_psocTable[] = {
 // BAT 12v--
 //         |
 //         R1
-// ADC-----|
-//         R2
-//         |
-// GND------
+// ADC-----|----|
+//         R2   C1
+//         |    |
+// GND-----------
 //
 // Using R1 = 200k and R2 = 47k, R2 / (R1 + R2) = 18.8%.
+// C1 is a 100nF capacitor to smooth out noise.
 //
 // Adjust values to measured resistance of specific resistors in your circuit.
 //
 // TODO. May need different tables for each battery. Also R2/(R1+R2) should be passed
 // as a param to begin() instead of being hardcoded here.
 //
-#define DIVIDER_R1      200
+#define DIVIDER_R1      201
 #define DIVIDER_R2      46.3
+
+// This adjustment factor can be used to tweak the factory calibration used
+// by analogReadMillivolts() to match a trusted external voltage meter.
+#define ADC_CAL_ADJ_FACTOR  (0.997)
 
 
 void Battery::begin(const char* name, int pin, float* histData, size_t histLen, int avgCount) {
@@ -55,7 +61,13 @@ void Battery::begin(const char* name, int pin, float* histData, size_t histLen, 
 
 bool Battery::updateVoltageData() {
     float v = readVoltage(m_pin);
-    return m_history.updateData(v);
+    
+    bool bDone = m_history.updateData(v);
+    if (bDone ) {
+        //Serial.println(getName());
+        //Serial.println(m_history.getLatestData(), 3);
+    }
+    return bDone;
 }
 
 void Battery::updateVoltageHistory() {
@@ -63,13 +75,13 @@ void Battery::updateVoltageHistory() {
 }
 
 float Battery::readVoltage(int pin) {
-    // Read 12-bit ADC
-    int val = analogRead(pin);
-    //Serial.println(val);
+    // See:
+    // https://docs.espressif.com/projects/esp-idf/en/v4.4.8/esp32/api-reference/peripherals/adc.html#minimizing-noise
+    // https://docs.espressif.com/projects/arduino-esp32/en/latest/api/adc.html
 
-    // From empirical data, ADC value is approximately 1079/volt
-    float adcVoltage = (2.429 * val / 2621);
-    //Serial.println(adcVoltage, 2);
+    // Read 12-bit ADC
+    float adcVoltage = (float)analogReadMilliVolts(pin) * ADC_CAL_ADJ_FACTOR / 1000.0;
+    //Serial.println(adcVoltage, 3);
 
     // Based on resistor divider, calculate the true voltage.
     float batteryVoltage = adcVoltage * (DIVIDER_R1 + DIVIDER_R2) / DIVIDER_R2;

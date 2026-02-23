@@ -34,6 +34,7 @@
 //#define TESTING
 
 #include "driver/rtc_io.h"   // For low level RTC config for deep sleep
+#include "esp_adc/adc_cali_scheme.h"
 
 #include <Adafruit_GFX.h>    // Core graphics library
 #include <Adafruit_ST7789.h> // Hardware-specific library for ST7789
@@ -263,7 +264,10 @@ void setup(void) {
   g_buttonD1.begin();
   g_buttonD2.begin();
 
-  g_samplingTimer.begin(nullptr, INTER_SAMPLE_INTERVAL_MS, samplingCallback);
+  // We alternate sampling each battery so run the timer at twice the rate to
+  // sample each battery every INTER_SAMPLE_INTERVAL_MS.
+  g_samplingTimer.begin(nullptr, INTER_SAMPLE_INTERVAL_MS / 2, samplingCallback);
+  
   // First sample is after initial averaging period. If we're active, subsequent
   // period is set to HISTORY_SAMPLE_INTERVAL_SECS.
   g_historyTimer.begin(&g_historyTimer, HISTORY_AVG_INTERVAL_MS, updateCallback);
@@ -271,6 +275,9 @@ void setup(void) {
   // ADC setup
   pinMode(BAT1_ADC_PIN, INPUT);
   pinMode(BAT2_ADC_PIN, INPUT);
+
+  // Use 11dB ADC attenuation to read 0-3100mV input
+  analogSetAttenuation(ADC_11db);
 
   if (g_bActive) {
       initDisplay();
@@ -404,11 +411,15 @@ void handleButtonEvents(Event e) {
 bool samplingCallback(void* user) {
 
     (void)user;
+    static int altBat = BAT1;
 
-    bool bDone1 = g_batteries[BAT1].updateVoltageData();
-    bool bDone2 = g_batteries[BAT2].updateVoltageData();
+    bool bDone = g_batteries[altBat].updateVoltageData();
 
-    if (g_bActive && (bDone1 || bDone2)) {
+    // Alternate which battery we update to avoid reading both ADC channels
+    // at the same time.
+    altBat = altBat == BAT1 ? BAT2 : BAT1;
+
+    if (g_bActive && bDone) {
         if (g_page == PAGE_NONE) {
             g_page = PAGE_SUMMARY;
         }
