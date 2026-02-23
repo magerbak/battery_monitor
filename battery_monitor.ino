@@ -21,9 +21,9 @@
   * Current draw when awake and idle is 26.5mA (0.345 W).
   * Current draw in deep sleep is 0.25mA (0.00325 W).
 
-  Wake time is approx. 6s every HISTORY_SAMPLE_INTERVAL_SECS. At 5mins, the awake
-  ratio is 1.96%, so average current draw is:
-    0.0196*37.3 + (1-0.0196)*0.25 = 0.976mA (12.7mW) ~= 1mA
+  Wake time is approx. 3.5s every HISTORY_SAMPLE_INTERVAL_SECS. At 5mins, the awake
+  ratio is 1.17%, so average current draw is:
+    0.0117*37.3 + (1-0.0117)*0.25 = 0.682mA (8.87mW)
 
   Deep sleep power could possibly be improved by shutting down more peripherals.
   It's not immediately obvious how much already gets disabled by default.
@@ -54,7 +54,7 @@
 // For each sample in history we average data samples every INTER_SAMPLE_INTERVAL_MS
 // for HISTORY_AVG_INTERVAL_MS.
 #define INTER_SAMPLE_INTERVAL_MS    100
-#define HISTORY_AVG_INTERVAL_MS     5000
+#define HISTORY_AVG_INTERVAL_MS     2500
 
 // Every HISTORY_SAMPLE_INTERVAL_SECS we record an averaged sample. When idle,
 // we expect to sleep for the balance of this interval.
@@ -78,6 +78,8 @@
 #define GREEN_PSOC      70.0
 #define YELLOW_PSOC     50.0
 #define RED_PSOC        0.0
+
+#define SERIAL_INIT_DELAY_MS    1000
 
 enum BatteryId {
     BAT1,
@@ -226,7 +228,7 @@ void displayUpdate();
 
 void setup(void) {
   Serial.begin(115200);
-  delay(1000);
+  delay(SERIAL_INIT_DELAY_MS);
   Serial.println(F("Starting battery monitor"));
 
   esp_sleep_wakeup_cause_t wakeup_reason = esp_sleep_get_wakeup_cause();
@@ -262,10 +264,9 @@ void setup(void) {
   g_buttonD1.begin();
   g_buttonD2.begin();
 
-  // We alternate sampling each battery so run the timer at twice the rate to
-  // sample each battery every INTER_SAMPLE_INTERVAL_MS.
-  g_samplingTimer.begin(nullptr, INTER_SAMPLE_INTERVAL_MS / 2, samplingCallback);
-  
+  // We sample each battery every INTER_SAMPLE_INTERVAL_MS.
+  g_samplingTimer.begin(nullptr, INTER_SAMPLE_INTERVAL_MS, samplingCallback);
+
   // First sample is after initial averaging period. If we're active, subsequent
   // period is set to HISTORY_SAMPLE_INTERVAL_SECS.
   g_historyTimer.begin(&g_historyTimer, HISTORY_AVG_INTERVAL_MS, updateCallback);
@@ -407,17 +408,14 @@ void handleButtonEvents(Event e) {
 
 
 bool samplingCallback(void* user) {
-
     (void)user;
-    static int altBat = BAT1;
 
-    bool bDone = g_batteries[altBat].updateVoltageData();
+    bool bDone1 = g_batteries[BAT1].updateVoltageData();
+    // ADC needs some recovery time between reading two different channels.
+    delay(10);
+    bool bDone2 = g_batteries[BAT2].updateVoltageData();
 
-    // Alternate which battery we update to avoid reading both ADC channels
-    // at the same time.
-    altBat = altBat == BAT1 ? BAT2 : BAT1;
-
-    if (g_bActive && bDone) {
+    if (g_bActive && (bDone1 || bDone2)) {
         if (g_page == PAGE_NONE) {
             g_page = PAGE_SUMMARY;
         }
@@ -463,7 +461,7 @@ bool updateCallback(void* user) {
         // However, we need to take account for the startup and averaging time
         // to avoid a time drift.
         esp_sleep_enable_timer_wakeup(1000ULL * (HISTORY_SAMPLE_INTERVAL_SECS * 1000 -
-                                                 (HISTORY_AVG_INTERVAL_MS + 1000)));
+                                                 (HISTORY_AVG_INTERVAL_MS + SERIAL_INIT_DELAY_MS)));
         esp_deep_sleep_start();
         // No return from this
     }

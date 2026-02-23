@@ -28,7 +28,7 @@ Displays voltage history for a single battery over 3hrs, 24hrs or 2 days.
   * History - cycles between 3hrs, 24hrs and 2 days of history (does not affect recorded data).
   * Back - exits the options menu.
 
-Samples are recorded every 5 minutes, with each sample being an average of 50 analog readings taken over 5s to reduce noise.
+Samples are recorded every 5 minutes, with each sample being an average of 25 analog readings taken over 2.5s to reduce noise.
 
 Data preserved between sleep cycles is located in RTC memory (limited to 8KB) which limits length of history (or sample rate).
 
@@ -38,8 +38,8 @@ Power measurements were using a 13V power supply and included the ESP32-S3 Feath
 * Current draw when awake and idle (display off): 26.5mA (345mW).
 * Current draw in deep sleep: 0.25mA (3.25mW).
 
-Device is awake for ~6s every HISTORY_SAMPLE_INTERVAL_SECS. At the default sample interval of 5 mins, the awake ratio is 1.96%, so average current draw is:
-> 0.0196*37.3 + (1-0.0196)*0.25 = ~0.976mA (12.7mW)
+Wake time is approximately 3.5s every HISTORY_SAMPLE_INTERVAL_SECS. At the default sample interval of 5mins, the awake ratio is 1.17%, so average current draw is:
+> 0.0117*37.3 + (1-0.0117)*0.25 = 0.682mA (8.87mW)
 
-Therefore average current draw from a nominal 12V battery is ~1mA. Theoretically, leaving this battery monitor connected to a 100Ah battery would deplete it by 10% in 10,000 hours or a little over 1 year.
+Theoretically, leaving this battery monitor connected for one year would consume about 6Ah of battery capacity.
 
