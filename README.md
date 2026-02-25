@@ -62,5 +62,7 @@ Power measurements were using a 13V power supply and included the ESP32-S3 Feath
 Wake time is approximately 3.5s every HISTORY_SAMPLE_INTERVAL_SECS. At the default sample interval of 5mins, the awake ratio is 1.17%, so average current draw is:
 > 0.0117*37.3 + (1-0.0117)*0.25 = 0.682mA (8.87mW)
 
+## Links
+See the [wiki](https://github.com/magerbak/battery_monitor/wiki) for more information on design, schematics, 3D models and CAD files.
 Theoretically, leaving this battery monitor connected for one year would consume about 6Ah of battery capacity.
 
