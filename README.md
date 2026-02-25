@@ -5,32 +5,53 @@ Implemented using the Arduino IDE for the Adafruit ESP32-S3 Reverse TFT Feather 
 * https://www.adafruit.com/products/5691
 
 ## Operation
+There are three top-level pages: a summary of both battery voltages, and a rolling history of each battery.
+
+When active, the current voltages are updated every 2.5s. The voltage history records a sample every 5 minutes.
+* After 15 minutes of no button activity, the device enters idle mode, switches off the display and enters deep sleep. In this state it wakes up every 5 minutes, without enabling the display, to record another voltage sample and then returns to deep sleep.
+* While idle, the D1 or D2 buttons can be used to return to active mode and enable the display.
+
+Data preserved between sleep cycles is located in RTC memory (limited to 8KB) which limits length of history (or sample rate).
+
 ### Summary Page
-Initial screen is a summary display of both battery voltages.
+A summary display of both battery voltages and their percent state of charge (based on typical AGM battery chemistry).
 
 ![PXL_20260126_001109261](https://github.com/user-attachments/assets/11b304bd-0ffb-4584-96aa-58aee903571a)
 
-
-* After 15 minutes of no button activity, the device enters idle mode, switches off the display and enters deep sleep. It wakes up every 5 minutes, without enabling the display, to record another voltage sample and then returns to deep sleep.
-* While idle, the D1 or D2 buttons can be used to return to active mode and enable the display.
-* While active the D1 button toggles between Summary and Battery History page
+* D1 (middle) button enters calibration page (see below).
+* D2 (bottom) button cycles between summary page and voltage history for battery 1 and 2.
 
 ### Battery History Page
-Displays voltage history for a single battery over 3hrs, 24hrs or 2 days.
+Displays voltage history for a single battery.
 
 ![PXL_20260117_213506372 PORTRAIT ORIGINAL](https://github.com/user-attachments/assets/7bc5ef19-2b25-4e54-b3f4-1460b4cc0b57)
 
-* D0 button toggles between BAT1 (engine) and BAT2 (house). 
-* D1 button toggles between Summary and Battery History page
-* D2 enters Options menu:
-  * Show Stats - controls whether history page displays min/max/avg voltage over history.
-  * Dynamic Scale - controls whether vertical axis scales dynamically or always shows 11-15V.
-  * History - cycles between 3hrs, 24hrs and 2 days of history (does not affect recorded data).
-  * Back - exits the options menu.
+* D0 (top) button cycles between displaying 3hr, 24hr and 2 day history.
+* D1 (middle) button enters options menu (see below).
+* D2 (bottom) button cycles between summary page and voltage history for battery 1 and 2.
 
-Samples are recorded every 5 minutes, with each sample being an average of 25 analog readings taken over 2.5s to reduce noise.
+### History Options Page
+The options menu allows the history display to be customized.
 
-Data preserved between sleep cycles is located in RTC memory (limited to 8KB) which limits length of history (or sample rate).
+![PXL_20260225_011426824](https://github.com/user-attachments/assets/dbb7af0f-0d35-4fcb-9f24-9cdbc3503d50)
+
+* Show Stats - controls whether history page displays min/max/avg voltage over history.
+* Dynamic Scale - controls whether vertical axis scales dynamically or always shows 11-15V.
+* Back - exits the options menu.
+  
+To navigate use:
+* D0 (top) cursor up
+* D1 (middle) cursor down
+* D2 (bottom) select
+
+### Calibration Page
+Allows the factory calibration of the ADC to be adjusted to compensate for small errors. The setting is saved persistently in flash.
+
+![PXL_20260225_005056576](https://github.com/user-attachments/assets/28ebab39-e756-4233-9f44-80843a772ccd)
+
+* D0 (top) increase voltage reading by 2%
+* D1 (middle) decrease voltage reading by 2%
+* D2 (bottom) save changes. Press again to confirm, any other key to cancel.
 
 ## Power Usage
 Power measurements were using a 13V power supply and included the ESP32-S3 Feather, a 12-5V buck converter and resistor dividers for the ADC inputs.
