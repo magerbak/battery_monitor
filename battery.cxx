@@ -25,22 +25,20 @@ const Battery::PSoC Battery::m_psocTable[] = {
     {   0, 0 },
 };
 
-// This adjustment factor can be used to tweak the factory calibration used
-// by analogReadMillivolts() to match a trusted external voltage meter.
-#define ADC_CAL_ADJ_FACTOR  (0.997)
 
-
-void Battery::begin(const char* name, int pin, float r1, float r2, float* histData, size_t histLen, int avgCount) {
+void Battery::begin(const char* name, int pin, float r1, float r2, float adcAdjustment,
+                    float* histData, size_t histLen, int avgCount) {
     m_pName = name;
     m_pin = pin;
 
+    m_adcAdjustment = adcAdjustment;
     m_scaleFactor = (r1 + r2) / r2;
 
     m_history.begin(histData, histLen, avgCount);
 }
 
 bool Battery::updateVoltageData() {
-    float v = readVoltage(m_pin, m_scaleFactor);
+    float v = readVoltage();
     
     bool bDone = m_history.updateData(v);
     if (bDone) {
@@ -54,15 +52,15 @@ void Battery::updateVoltageHistory() {
     m_history.updateHistory();
 }
 
-float Battery::readVoltage(int pin, float scaleFactor) {
+float Battery::readVoltage() {
     // See https://docs.espressif.com/projects/arduino-esp32/en/latest/api/adc.html
 
     // Read ADC and convert to calibrated voltage.
-    float adcVoltage = (float)analogReadMilliVolts(pin) * ADC_CAL_ADJ_FACTOR / 1000.0;
+    float adcVoltage = (float)analogReadMilliVolts(m_pin) * m_adcAdjustment / 1000.0;
     //Serial.println(adcVoltage, 3);
 
     // Based on resistor divider, calculate the battery voltage.
-    float batteryVoltage = adcVoltage * scaleFactor;
+    float batteryVoltage = adcVoltage * m_scaleFactor;
     //Serial.println(batteryVoltage, 2);
 
     return batteryVoltage;

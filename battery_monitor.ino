@@ -4,14 +4,26 @@
   Implemented for the Adafruit ESP32-S3 Reverse TFT Feather
     ----> https://www.adafruit.com/products/5691
 
-  At initial startup or when woken with a button-press, displays a summary of
-  current battery voltages.
+  At initial startup displays a summary of current battery 1 (engine) and 2 (house)
+  voltages:
+   * D1 button enters calibration page.
+   * D2 button cycles between summary page and voltage history for battery 1 and 2.
 
-  D1 button toggles display of battery history. From the history page, D0 toggles
-  between BAT1 and BAT2. D2 enters options menu.
+  In voltage history pages:
+   * D0 button cycles between 3hr, 24hr and 2 day history.
+   * D1 button enters options menu.
+   * D2 button cycles between summary page and voltage history for battery 1 and 2.
 
-  After a specified idle interval, enters deep sleep and then periodically wakes
-  up, samples voltage and then returns to deep sleep.
+  The calibration page allows the factory calibration of the ADC to be adjusted to
+  compensate for small errors. The setting is saved persistently in flash:
+   * D0 increase voltage reading by 2%
+   * D1 decrease voltage reading by 2%
+   * D2 save changes. Press again to confirm, any other key to cancel.
+
+  After a specified idle interval, disables display and enters deep sleep.
+  Periodically wakes up with the display off, samples battery voltage and returns
+  to deep sleep. A D1 or D2 button press will return the device to active mode
+  (enable the display).
 
   Data preserved between sleep cycles is located in RTC memory (limited to 8KB) which
   limits length of history (or sample rate).
@@ -28,13 +40,13 @@
   Deep sleep power could possibly be improved by shutting down more peripherals.
   It's not immediately obvious how much already gets disabled by default.
 
-  Uses the Adafruit GFX library and the ST7789 display driver.
+  Uses the Adafruit GFX library, the ST7789 display driver, and the Preferences library.
 
  **************************************************************************/
 //#define TESTING
 
 #include "driver/rtc_io.h"   // For low level RTC config for deep sleep
-
+#include <Preferences.h>     // For persistent storage of calibration adjustment
 #include <Adafruit_GFX.h>    // Core graphics library
 #include <Adafruit_ST7789.h> // Hardware-specific library for ST7789
 #include <SPI.h>
@@ -135,16 +147,19 @@ enum Event {
 enum Page {
     PAGE_NONE,
     PAGE_SUMMARY,
-    PAGE_HISTORY,
-    PAGE_OPTIONS,
+    PAGE_BAT1_HISTORY,
+    PAGE_BAT2_HISTORY,
+    PAGE_BAT1_OPTIONS,
+    PAGE_BAT2_OPTIONS,
+    PAGE_CALIBRATION,
     PAGE_END
 };
 
-// Make corresponding edits to g_optionsTable
+
+// Make corresponding edits to g_optionsTable and displayHistory()
 enum Options {
     OPT_SHOW_STATS,
     OPT_DYNAMIC_SCALE,
-    OPT_RANGE,
     OPT_BACK,
 };
 
@@ -204,7 +219,6 @@ struct HistOptions {
 const char* g_optionsTable[OPT_BACK + 1] = {
     "Show Stats ",
     "Dynamic Scale ",
-    "History ",
     "Back"
 };
 
@@ -216,6 +230,11 @@ const char* g_rangeOptionsTable[NUM_RANGE_OPTIONS] = {
 
 // Use dedicated hardware SPI pins
 Adafruit_ST7789 g_tft = Adafruit_ST7789(TFT_CS, TFT_DC, TFT_RST);
+
+Preferences g_prefs;
+float g_adcAdjustment = 1.0;
+float g_prevAdcAdjustment = 1.0;
+bool g_calConfirmation = false;
 
 SimpleTimer g_samplingTimer;
 SimpleTimer g_historyTimer;
@@ -255,6 +274,8 @@ void drawHistoryCallback(void* user, const double* dataMin, const double* dataMa
                          size_t len, size_t offset);
 void displayHistory(const char* title, double val, const AvgDataHistory<double>* hist);
 
+void displayCalibration();
+
 void displaySplashScreen();
 
 void displayUpdate();
@@ -266,6 +287,8 @@ void setup(void) {
   delay(SERIAL_INIT_DELAY_MS);
   Serial.println(F("Starting battery monitor"));
 
+  g_prefs.begin("battery_monitor");
+
   esp_sleep_wakeup_cause_t wakeup_reason = esp_sleep_get_wakeup_cause();
 
   if (wakeup_reason == ESP_SLEEP_WAKEUP_UNDEFINED) {
@@ -274,10 +297,14 @@ void setup(void) {
       g_bActive = true;
       g_lastActive = millis();
 
+      g_adcAdjustment = g_prefs.getFloat("adcAdjustment", 1.0);
+
       g_batteries[BAT1].begin("Engine", BAT1_ADC_PIN, DIVIDER_R1, DIVIDER_R2,
+                              g_adcAdjustment,
                               g_bat1History, HISTORY_NUM_DATA_POINTS,
                               HISTORY_AVG_INTERVAL_MS / INTER_SAMPLE_INTERVAL_MS);
       g_batteries[BAT2].begin("House",  BAT2_ADC_PIN, DIVIDER_R1, DIVIDER_R2,
+                              g_adcAdjustment,
                               g_bat2History, HISTORY_NUM_DATA_POINTS,
                               HISTORY_AVG_INTERVAL_MS / INTER_SAMPLE_INTERVAL_MS);
   }
@@ -342,10 +369,6 @@ void loop() {
 ////////////////////////////////////////////////////////////////////////////
 
 void handleButtonEvents(Event e) {
-    // D0 cycles selecting starter, house battery.
-    // D1 toggle between summary and history
-    // D2 option menu (display stats on/off, dynamic scale on/off, 3hr/24hr/7day history, back).
-
     if (!g_bActive) {
         g_bActive = true;
         g_lastActive = millis();
@@ -358,9 +381,17 @@ void handleButtonEvents(Event e) {
             return;
 
         case PAGE_SUMMARY:
+            // D1 calibration menu
+            // D2 cycles to next page
             switch (e) {
                 case EVT_D1_PRESS:
-                    g_page = PAGE_HISTORY;
+                    g_prevAdcAdjustment = g_adcAdjustment;
+                    g_calConfirmation = false;
+                    g_page = PAGE_CALIBRATION;
+                    break;
+
+                case EVT_D2_PRESS:
+                    g_page = PAGE_BAT1_HISTORY;
                     break;
 
                 default:
@@ -368,25 +399,28 @@ void handleButtonEvents(Event e) {
             }
             break;
 
-        case PAGE_HISTORY:
+        case PAGE_BAT1_HISTORY:
+            // D0 cyles through history ranges (3hrs/24hrs/2days)
+            // D1 option menu (display stats on/off, dynamic scale on/off, back).
+            // D2 cycles to next page
             switch (e) {
                 case EVT_D0_PRESS:
                     {
-                        int b = g_selBattery;
-                        if (++b == NUM_BATTERIES) {
-                            b = 0;
+                        int r = g_histOptions.range;
+                        if (++r == HistRange::NUM_RANGE_OPTIONS) {
+                            r = 0;
                         }
-                        g_selBattery = (BatteryId)b;
+                        g_histOptions.range = (HistRange)r;
                     }
                     break;
 
                 case EVT_D1_PRESS:
-                    g_page = PAGE_SUMMARY;
+                    g_histOptions.cursor = OPT_SHOW_STATS;
+                    g_page = PAGE_BAT1_OPTIONS;
                     break;
 
                 case EVT_D2_PRESS:
-                    g_histOptions.cursor = OPT_SHOW_STATS;
-                    g_page = PAGE_OPTIONS;
+                    g_page = PAGE_BAT2_HISTORY;
                     break;
 
                 default:
@@ -394,7 +428,40 @@ void handleButtonEvents(Event e) {
             }
             break;
 
-        case PAGE_OPTIONS:
+        case PAGE_BAT2_HISTORY:
+            // D0 cyles through history ranges (3hrs/24hrs/2days)
+            // D1 option menu (display stats on/off, dynamic scale on/off, back).
+            // D2 cycles to next page
+            switch (e) {
+                case EVT_D0_PRESS:
+                    {
+                        int r = g_histOptions.range;
+                        if (++r == HistRange::NUM_RANGE_OPTIONS) {
+                            r = 0;
+                        }
+                        g_histOptions.range = (HistRange)r;
+                    }
+                    break;
+
+                case EVT_D1_PRESS:
+                    g_histOptions.cursor = OPT_SHOW_STATS;
+                    g_page = PAGE_BAT2_OPTIONS;
+                    break;
+
+                case EVT_D2_PRESS:
+                    g_page = PAGE_SUMMARY;
+                    break;
+
+                default:
+                    return;
+            }
+            break;
+
+        case PAGE_BAT1_OPTIONS:
+        case PAGE_BAT2_OPTIONS:
+            // D0 Cursor up
+            // D1 Cursor down
+            // D2 Select
             switch (e) {
                 case EVT_D0_PRESS:
                     if (g_histOptions.cursor > 0) {
@@ -418,18 +485,8 @@ void handleButtonEvents(Event e) {
                             g_histOptions.bDynamicScale = !g_histOptions.bDynamicScale;
                             break;
 
-                        case OPT_RANGE:
-                            {
-                                int r = g_histOptions.range;
-                                if (++r == HistRange::NUM_RANGE_OPTIONS) {
-                                    r = 0;
-                                }
-                                g_histOptions.range = (HistRange)r;
-                            }
-                            break;
-
                         case OPT_BACK:
-                            g_page = PAGE_HISTORY;
+                            g_page = (g_page == PAGE_BAT1_OPTIONS) ? PAGE_BAT1_HISTORY : PAGE_BAT2_HISTORY;
                             break;
                     }
                     break;
@@ -437,6 +494,50 @@ void handleButtonEvents(Event e) {
                 default:
                     return;
             }
+            break;
+
+        case PAGE_CALIBRATION:
+            // D0 Adjust +2%
+            // D1 Adjust -2%
+            // D2 Save and exit
+            switch (e) {
+                case EVT_D0_PRESS:
+                    if (g_calConfirmation) {
+                        // Cancel
+                        g_adcAdjustment = g_prevAdcAdjustment;
+                        g_page = PAGE_SUMMARY;
+                    } else {
+                        g_adcAdjustment += 0.002;
+                    }
+                    break;
+
+                case EVT_D1_PRESS:
+                    if (g_calConfirmation) {
+                        // Cancel
+                        g_adcAdjustment = g_prevAdcAdjustment;
+                        g_page = PAGE_SUMMARY;
+                    }
+                    else {
+                        g_adcAdjustment -= 0.002;
+                    }
+                    break;
+
+                case EVT_D2_PRESS:
+                    if (g_calConfirmation) {
+                        g_prefs.putFloat("adcAdjustment", g_adcAdjustment);
+                        g_page = PAGE_SUMMARY;
+                    }
+                    else {
+                        g_calConfirmation = true;
+                    }
+                    break;
+
+                default:
+                    return;
+            }
+            g_batteries[BAT1].setAdcAdjustment(g_adcAdjustment);
+            g_batteries[BAT2].setAdcAdjustment(g_adcAdjustment);
+
             break;
     }
 
@@ -477,6 +578,9 @@ bool updateCallback(void* user) {
     g_batteries[BAT2].updateVoltageHistory();
 
     uint32_t t = millis();
+
+    // If we're idle, then enter deep sleep until the next time we need to record
+    // a sample.
     if (g_bActive == false || (t - g_lastActive) > IDLE_TIMEOUT_MS) {
         g_bActive = false;
 
@@ -485,7 +589,9 @@ bool updateCallback(void* user) {
         // Deep sleep
 
         // Wake up on button press of D1 or D2 (can't use D0 because it's active low
-        // on the the TFT reverse feather).
+        // on the the TFT reverse feather, and all buttons must use the same logic).
+        // When only the RTC domain is powered on we need to manually configure the
+        // pulldown on the button pins.
         rtc_gpio_pullup_dis(BUTTON_D1_PIN);
         rtc_gpio_pulldown_en(BUTTON_D1_PIN);
         rtc_gpio_pullup_dis(BUTTON_D2_PIN);
@@ -826,12 +932,33 @@ void displayOptions() {
     g_tft.println(g_histOptions.bShowStats ? "Yes" : "No");
     g_tft.print(g_optionsTable[OPT_DYNAMIC_SCALE]);
     g_tft.println(g_histOptions.bDynamicScale ? "Yes" : "No");
-    g_tft.print(g_optionsTable[OPT_RANGE]);
-    g_tft.println(g_rangeOptionsTable[g_histOptions.range]);
     g_tft.print(g_optionsTable[OPT_BACK]);
 
     int16_t y = 16 * g_histOptions.cursor;
     g_tft.drawRect(0, y, DISPLAY_WIDTH, 15, ST77XX_WHITE);
+}
+
+void displayCalibration() {
+    char buffer[32];
+
+    g_tft.setTextWrap(false);
+    g_tft.fillScreen(ST77XX_BLACK);
+
+    g_tft.setTextColor(ST77XX_WHITE);
+    g_tft.setTextSize(2);
+    g_tft.setCursor(0, 0);
+    g_tft.println("Calibration:");
+
+    g_tft.setTextSize(3);
+    float v = g_batteries[BAT2].getHistory()->getLatestData();
+    snprintf(buffer, sizeof(buffer), "%s %.2fV", g_batteries[BAT2].getName(), v);
+    drawJustifiedText(buffer, DISPLAY_WIDTH / 2,  40, TXT_CENTERED);
+
+    if (g_calConfirmation) {
+        g_tft.setTextSize(2);
+        drawJustifiedText("Press again to save", DISPLAY_WIDTH / 2,  80, TXT_CENTERED);
+        drawJustifiedText("Other key to cancel", DISPLAY_WIDTH / 2, 100, TXT_CENTERED);
+    }
 }
 
 void displaySplashScreen() {
@@ -857,12 +984,21 @@ void displayUpdate() {
                 displaySummary();
                 break;
 
-            case PAGE_HISTORY:
-                displayHistory(&g_batteries[g_selBattery]);
+            case PAGE_BAT1_HISTORY:
+                displayHistory(&g_batteries[BAT1]);
                 break;
 
-            case PAGE_OPTIONS:
+            case PAGE_BAT2_HISTORY:
+                displayHistory(&g_batteries[BAT2]);
+                break;
+
+            case PAGE_BAT1_OPTIONS:
+            case PAGE_BAT2_OPTIONS:
                 displayOptions();
+                break;
+
+            case PAGE_CALIBRATION:
+                displayCalibration();
                 break;
         }
     }

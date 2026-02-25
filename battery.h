@@ -17,7 +17,8 @@ public:
     Battery() = default;
     ~Battery() = default;
 
-    void begin(const char* name, int pin, float r1, float r2, float* histData, size_t histLen, int avgCount);
+    void begin(const char* name, int pin, float r1, float r2, float adcAdjustment,
+               float* histData, size_t histLen, int avgCount);
 
     bool updateVoltageData();
     void updateVoltageHistory();
@@ -25,6 +26,8 @@ public:
     const char* getName() const { return m_pName; }
     float getVoltage() const { return m_history.getLatestData(); }
     const AvgDataHistory<float>* getHistory() const { return &m_history; }
+
+    void setAdcAdjustment(float adcAdjustment) {m_adcAdjustment = adcAdjustment; }
 
     static float calcPSoC(float voltage);
 
@@ -35,12 +38,13 @@ private:
         double v;
     };
 
-    static float readVoltage(int pin, float scaleFactor);
+    float readVoltage();
 
     static const PSoC m_psocTable[];
 
     const char* m_pName = nullptr;
     int m_pin = 0;
+    float m_adcAdjustment = 0.0;
     float m_scaleFactor = 0.0;
 
     AvgDataHistory<float> m_history;
