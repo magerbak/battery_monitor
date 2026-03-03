@@ -56,6 +56,9 @@
 #include "simple_timer.h"
 #include "avg_data_history.h"
 
+
+#define VERSION_NUM         "v1.0.0"
+
 #define BUTTON_D0_PIN       GPIO_NUM_0
 #define BUTTON_D1_PIN       GPIO_NUM_1
 #define BUTTON_D2_PIN       GPIO_NUM_2
@@ -969,6 +972,10 @@ void displaySplashScreen() {
     g_tft.setTextSize(3);
     g_tft.setCursor(10, 48);
     g_tft.print("Initializing");
+
+    g_tft.setTextColor(ST77XX_YELLOW);
+    g_tft.setTextSize(1);
+    drawJustifiedText(VERSION_NUM, DISPLAY_WIDTH, DISPLAY_HEIGHT, TXT_JUSTIFIED);
 }
 
 // Redraw the display.
