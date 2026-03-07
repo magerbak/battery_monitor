@@ -57,7 +57,7 @@
 #include "avg_data_history.h"
 
 
-#define VERSION_NUM         "v1.0.0"
+#define VERSION_NUM         "v1.0.2"
 
 #define BUTTON_D0_PIN       GPIO_NUM_0
 #define BUTTON_D1_PIN       GPIO_NUM_1
@@ -323,6 +323,10 @@ void setup(void) {
       g_bActive = false;
   }
 
+  g_histOptions.bShowStats = g_prefs.getBool("showStats", true);
+  g_histOptions.bDynamicScale = g_prefs.getBool("dynamicScale", true);
+  g_histOptions.range = (HistRange)g_prefs.getInt("range", 0);
+
   // Deconfigure RTC config of button pins during deep sleep
   rtc_gpio_deinit(BUTTON_D1_PIN);
   rtc_gpio_deinit(BUTTON_D2_PIN);
@@ -443,6 +447,7 @@ void handleButtonEvents(Event e) {
                             r = 0;
                         }
                         g_histOptions.range = (HistRange)r;
+                        g_prefs.putInt("range", r);
                     }
                     break;
 
@@ -489,6 +494,8 @@ void handleButtonEvents(Event e) {
                             break;
 
                         case OPT_BACK:
+                            g_prefs.putBool("showStats", g_histOptions.bShowStats);
+                            g_prefs.putBool("dynamicScale", g_histOptions.bDynamicScale);
                             g_page = (g_page == PAGE_BAT1_OPTIONS) ? PAGE_BAT1_HISTORY : PAGE_BAT2_HISTORY;
                             break;
                     }
