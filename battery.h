@@ -34,8 +34,8 @@ public:
 private:
     struct PSoC
     {
-        double psoc;
-        double v;
+        float psoc;
+        float v;
     };
 
     float readVoltage();

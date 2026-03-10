@@ -57,7 +57,7 @@
 #include "avg_data_history.h"
 
 
-#define VERSION_NUM         "v1.0.2"
+#define VERSION_NUM         "v1.0.3"
 
 #define BUTTON_D0_PIN       GPIO_NUM_0
 #define BUTTON_D1_PIN       GPIO_NUM_1
@@ -262,26 +262,6 @@ RTC_DATA_ATTR float g_bat2History[HISTORY_NUM_DATA_POINTS];
 
 // Battery state
 RTC_DATA_ATTR Battery g_batteries[NUM_BATTERIES];
-
-void handleButtonEvents(Event e);
-bool samplingCallback(void* user);
-bool updateCallback(void* user);
-
-uint16_t getPSoCColor(float psoc);
-void drawJustifiedText(const char* str, int x, int y, TextLayout fmt);
-void drawJustifiedVal(double val, int precision, const char* suffix, int x, int y, TextLayout fmt);
-
-void statsHistoryCallback(void* user, const double* dataMin, const double* dataMax,
-                          size_t len, size_t offset);
-void drawHistoryCallback(void* user, const double* dataMin, const double* dataMax,
-                         size_t len, size_t offset);
-void displayHistory(const char* title, double val, const AvgDataHistory<double>* hist);
-
-void displayCalibration();
-
-void displaySplashScreen();
-
-void displayUpdate();
 
 ////////////////////////////////////////////////////////////////////////////
 
@@ -799,12 +779,12 @@ void displayHistory(const Battery* bat) {
 
     switch (g_histOptions.range) {
         case RANGE_3_HRS:
-            minOffset = maxOffset - (maxOffset / 24);
+            minOffset = maxOffset - (12 * 3);
             stepx = DISPLAY_WIDTH / 12;
             break;
 
         case RANGE_24_HRS:
-            minOffset = maxOffset - (maxOffset / 2);
+            minOffset = maxOffset - (12 * 24);
             stepx = DISPLAY_WIDTH / 24;
             break;
 

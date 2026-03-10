@@ -61,7 +61,6 @@ public:
         m_data[m_offset] = m_avg;
 
         if (++m_offset == m_len) {
-            Serial.println("Wrap");
             m_bWrapped = true;
             m_offset = 0;
         }

@@ -28,8 +28,8 @@ void SimpleTimer::setInterval(uint32_t interval) {
 uint32_t SimpleTimer::getRemaining() const {
     uint32_t t = millis();
 
-    if (t > m_start) {
-        return t - m_start;
+    if (t < m_start + m_interval) {
+        return m_start + m_interval - t;
     }
 
     return 0;
