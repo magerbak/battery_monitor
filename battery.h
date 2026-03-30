@@ -3,14 +3,18 @@
 #include <stdint.h>
 #include <stddef.h>
 
-#include "avg_data_history.h"
+#include "adc_data.h"
 
-// We assume we're monitoring a nominal 12v battery. 
-// See also the percent state of charge table and resistor divider defines in battery.cxx 
-// that may need to be customized.
+// We assume we're monitoring a nominal 12v battery.
+// See also the m_psocTable in battery.cxx which assumes a 12V AGM battery.
+// That may need to be passed in per battery.
 #define MAX_VOLTAGE     15.0
 #define MIN_VOLTAGE     11.0
 
+class ExtHistory;
+
+// A light wrapper around an ADC object for tracking the current voltage of a
+// battery.
 class Battery
 {
 public:
@@ -18,16 +22,14 @@ public:
     ~Battery() = default;
 
     void begin(const char* name, int pin, float r1, float r2, float adcAdjustment,
-               float* histData, size_t histLen, int avgCount);
+               int avgCount, ExtHistory* history);
 
     bool updateVoltageData();
-    void updateVoltageHistory();
+    void setAdcAdjustment(float adcAdjustment) { m_adc.setAdcAdjustment(adcAdjustment); }
 
     const char* getName() const { return m_pName; }
-    float getVoltage() const { return m_history.getLatestData(); }
-    const AvgDataHistory<float>* getHistory() const { return &m_history; }
-
-    void setAdcAdjustment(float adcAdjustment) {m_adcAdjustment = adcAdjustment; }
+    float getVoltage() const { return m_adc.getVoltage(); }
+    const ExtHistory* getHistory() const { return m_history; }
 
     static float calcPSoC(float voltage);
 
@@ -38,16 +40,11 @@ private:
         float v;
     };
 
-    float readVoltage();
-
     static const PSoC m_psocTable[];
 
     const char* m_pName = nullptr;
-    int m_pin = 0;
-    float m_adcAdjustment = 0.0;
-    float m_scaleFactor = 0.0;
-
-    AvgDataHistory<float> m_history;
+    AdcData m_adc;
+    ExtHistory* m_history;
 };
 
 

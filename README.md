@@ -1,5 +1,5 @@
 # ESP32-S3 12V Battery Monitor
-Records a 2 day history of battery voltages on two analog pins.
+Records a 16 day voltage history of two batteries.
 
 Implemented using the Arduino IDE for the Adafruit ESP32-S3 Reverse TFT Feather although I anticipate the code would port pretty easily for most ESP32 modules.
 * https://www.adafruit.com/products/5691
@@ -11,7 +11,12 @@ When active, the current voltages are updated every 2.5s. The voltage history re
 * After 15 minutes of no button activity, the device enters idle mode, switches off the display and enters deep sleep. In this state it wakes up every 5 minutes, without enabling the display, to record another voltage sample and then returns to deep sleep.
 * While idle, the D1 or D2 buttons can be used to return to active mode and enable the display.
 
-Data preserved between sleep cycles is located in RTC memory (limited to 8KB) which limits length of history (or sample rate).
+History is saved to flash in 16 segments (each corresponding to 24hrs).
+The current segment is also written to RTC memory that is preserved between deep
+sleep cycles. When waking from deep sleep, the full history is first loaded from
+flash and then the RTC history is copied into the current segment. An
+interruption of battery power therefore results in up to one segment of history
+being lost.
 
 ### Summary Page
 A summary display of both battery voltages and their percent state of charge (based on typical AGM battery chemistry).
@@ -26,7 +31,7 @@ Displays voltage history for a single battery.
 
 ![PXL_20260117_213506372 PORTRAIT ORIGINAL](https://github.com/user-attachments/assets/7bc5ef19-2b25-4e54-b3f4-1460b4cc0b57)
 
-* D0 (top) button cycles between displaying 3hr, 24hr and 2 day history.
+* D0 (top) button cycles between displaying 12hr, 48hr and 16 day history.
 * D1 (middle) button enters options menu (see below).
 * D2 (bottom) button cycles between summary page and voltage history for battery 1 and 2.
 
@@ -37,6 +42,7 @@ The options menu allows the history display to be customized.
 
 * Show Stats - controls whether history page displays min/max/avg voltage over history.
 * Dynamic Scale - controls whether vertical axis scales dynamically or always shows 11-15V.
+* Clear History - resets the saved history (new in v1.1.0)
 * Back - exits the options menu.
   
 To navigate use:

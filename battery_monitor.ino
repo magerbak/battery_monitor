@@ -1,5 +1,5 @@
 /**************************************************************************
-  Records a 2 day history of battery voltage on two analog pins.
+  Records a 16 day voltage history of two batteries.
 
   Implemented for the Adafruit ESP32-S3 Reverse TFT Feather
     ----> https://www.adafruit.com/products/5691
@@ -10,7 +10,7 @@
    * D2 button cycles between summary page and voltage history for battery 1 and 2.
 
   In voltage history pages:
-   * D0 button cycles between 3hr, 24hr and 2 day history.
+   * D0 button cycles between 12hr, 48hr and 16 day history.
    * D1 button enters options menu.
    * D2 button cycles between summary page and voltage history for battery 1 and 2.
 
@@ -20,13 +20,17 @@
    * D1 decrease voltage reading by 2%
    * D2 save changes. Press again to confirm, any other key to cancel.
 
-  After a specified idle interval, disables display and enters deep sleep.
+  After a 15min idle interval, disables display and enters deep sleep.
   Periodically wakes up with the display off, samples battery voltage and returns
   to deep sleep. A D1 or D2 button press will return the device to active mode
   (enable the display).
 
-  Data preserved between sleep cycles is located in RTC memory (limited to 8KB) which
-  limits length of history (or sample rate).
+  History is saved in 16 segments (each corresponding to 24hrs), each
+  of which is saved in flash. The current segment is also written to RTC memory
+  that is preserved between sleep cycles. When waking from deep sleep, the
+  history is loaded from flash and then the RTC history is copied into the
+  current segment. An interruption of battery power therefore results in up to
+  one segment of history being lost.
 
   With a nominal 12V battery, including a 12V to 5V converter:
   * Current draw when active (display on) is 37.3mA (0.485 W).
@@ -40,9 +44,10 @@
   Deep sleep power could possibly be improved by shutting down more peripherals.
   It's not immediately obvious how much already gets disabled by default.
 
-  Uses the Adafruit GFX library, the ST7789 display driver, and the Preferences library.
+  Uses the Adafruit GFX library, the ST7789 display driver, the Preferences library
+  and the LittleFS flash filesystem library.
 
- **************************************************************************/
+**************************************************************************/
 //#define TESTING
 
 #include "driver/rtc_io.h"   // For low level RTC config for deep sleep
@@ -50,14 +55,18 @@
 #include <Adafruit_GFX.h>    // Core graphics library
 #include <Adafruit_ST7789.h> // Hardware-specific library for ST7789
 #include <SPI.h>
+#include "FS.h"
+#include <LittleFS.h>
 
 #include "debounced_button.h"
+#include "adc_data.h"
 #include "battery.h"
 #include "simple_timer.h"
-#include "avg_data_history.h"
+#include "data_history.h"
+#include "ext_history.h"
 
 
-#define VERSION_NUM         "v1.0.3"
+#define VERSION_NUM         "v1.1.0"
 
 #define BUTTON_D0_PIN       GPIO_NUM_0
 #define BUTTON_D1_PIN       GPIO_NUM_1
@@ -76,15 +85,23 @@
 #ifdef TESTING
     // For testing we pretend time has sped up 20x
     #define HISTORY_SAMPLE_INTERVAL_SECS    (15)
-    #define IDLE_TIMEOUT_MS                 (1 * 60 * 1000)
+    #define IDLE_TIMEOUT_MS                 (2 * 60 * 1000)
 #else
     #define HISTORY_SAMPLE_INTERVAL_SECS    (5 * 60)
     #define IDLE_TIMEOUT_MS                 (15 * 60 * 1000)
 #endif
 
-// 2 days, assuming sampling every 5mins.
-// This consumes 4608 bytes of the 8kB RTC memory
-#define HISTORY_NUM_DATA_POINTS         (2 * 24 * 12)
+// Num of samples per segment of history.
+// 24hrs, assuming sampling every 5mins. This consumes 2304 bytes of the 8kB
+// RTC memory (plus few bytes of fixed overhead).
+#define HISTORY_NUM_DATA_POINTS         (24 * 12)
+
+// Total number of samples that can be displayed. Includes samples stored in flash.
+// 16 days, assuming sampling every 5mins.
+#define EXT_HISTORY_NUM_DATA_POINTS     (ExtHistory::NUM_SEGMENTS * HISTORY_NUM_DATA_POINTS)
+
+#define BAT1_EXT_HIST_PATH              "/bat1hist"
+#define BAT2_EXT_HIST_PATH              "/bat2hist"
 
 #define DISPLAY_WIDTH   240
 #define DISPLAY_HEIGHT  135
@@ -117,7 +134,7 @@
 // compensate for this, although we primarily care about accuracy in the 11-13V
 // range at the battery for determining state of charge, which corresponds to
 // 2-2.5V at the ADC using the current resistor values. In retrospect, using
-// 220k for R1 would have been a simpler choice.
+// 220k for R1 would have been a simpler than 2x100k.
 //
 // See the v4.4 doc for background, however the APIs have radically changed in
 // v.5.5. Fortunately, the Arduino analogReadMilliVolts() API takes care of all
@@ -126,6 +143,7 @@
 // https://docs.espressif.com/projects/esp-idf/en/v5.5.3/esp32s3/api-reference/peripherals/adc_calibration.html
 //
 // Adjust resistor values to measured resistance of specific resistors in your circuit.
+// Or you can just rely on the user-calibration setting to compensate.
 #define DIVIDER_R1      (100 + 101)
 #define DIVIDER_R2      46.3
 
@@ -163,14 +181,15 @@ enum Page {
 enum Options {
     OPT_SHOW_STATS,
     OPT_DYNAMIC_SCALE,
+    OPT_CLEAR_HIST,
     OPT_BACK,
 };
 
 // Make corresponding edits to g_rangeOptionsTable and displayHistory()
 enum HistRange {
-    RANGE_3_HRS,
-    RANGE_24_HRS,
+    RANGE_12_HRS,
     RANGE_2_DAYS,
+    RANGE_16_DAYS,
     NUM_RANGE_OPTIONS
 };
 
@@ -190,9 +209,9 @@ struct HistWindowContext {
     size_t count = 0;
     double prev_val = 0.0;
 
-    unsigned int min_x; // Minimum x axis data offset
+    unsigned int min_x; // Minimum x axis index
     double min_y;       // Minimum y axis value
-    unsigned int max_x; // Maximum x axis data offset
+    unsigned int max_x; // Maximum x axis index
     double max_y;       // Maximum y axis value
     size_t size = 0;    // Max num history samples
 };
@@ -200,8 +219,8 @@ struct HistWindowContext {
 struct HistStatsContext {
     bool bFirst = true;
 
-    unsigned int min_x = 0; // Minimum x axis data offset
-    unsigned int max_x = 0; // Maximum x axis data offset
+    unsigned int min_x = 0; // Minimum x axis index
+    unsigned int max_x = 0; // Maximum x axis index
     size_t size = 0;    // Max num history samples
 
     // Stats for current history samples.
@@ -216,19 +235,20 @@ struct HistOptions {
 
     bool bShowStats = true;
     bool bDynamicScale = true;
-    HistRange range = RANGE_3_HRS;
+    HistRange range = RANGE_12_HRS;
 };
 
 const char* g_optionsTable[OPT_BACK + 1] = {
     "Show Stats ",
     "Dynamic Scale ",
+    "Clear History ",
     "Back"
 };
 
 const char* g_rangeOptionsTable[NUM_RANGE_OPTIONS] = {
-    "3hrs",
-    "24hrs",
+    "12hrs",
     "2days",
+    "16days",
 };
 
 // Use dedicated hardware SPI pins
@@ -238,6 +258,7 @@ Preferences g_prefs;
 float g_adcAdjustment = 1.0;
 float g_prevAdcAdjustment = 1.0;
 bool g_calConfirmation = false;
+unsigned int g_histIndex = 0;
 
 SimpleTimer g_samplingTimer;
 SimpleTimer g_historyTimer;
@@ -252,16 +273,21 @@ DebouncedButton g_buttonD2(BUTTON_D2_PIN);
 bool g_bActive = false;
 uint32_t g_lastActive = 0;
 
+// Battery state
+Battery g_batteries[NUM_BATTERIES];
+
+// Extended data history backed by flash.
+ExtHistory g_batteryExtHist[NUM_BATTERIES];
+
 // UI state preserved during deep sleeps
 RTC_DATA_ATTR Page g_page = PAGE_NONE;
 RTC_DATA_ATTR BatteryId g_selBattery = BAT2;
 RTC_DATA_ATTR HistOptions g_histOptions;
 
-RTC_DATA_ATTR float g_bat1History[HISTORY_NUM_DATA_POINTS];
-RTC_DATA_ATTR float g_bat2History[HISTORY_NUM_DATA_POINTS];
+// Data history preserved in RTC memory during deep sleep
+RTC_DATA_ATTR float g_rtcData[NUM_BATTERIES][HISTORY_NUM_DATA_POINTS];
+RTC_DATA_ATTR DataHistory g_rtcHistory[NUM_BATTERIES];
 
-// Battery state
-RTC_DATA_ATTR Battery g_batteries[NUM_BATTERIES];
 
 ////////////////////////////////////////////////////////////////////////////
 
@@ -275,30 +301,22 @@ void setup(void) {
   esp_sleep_wakeup_cause_t wakeup_reason = esp_sleep_get_wakeup_cause();
 
   if (wakeup_reason == ESP_SLEEP_WAKEUP_UNDEFINED) {
-      // Cold boot (power loss or hard reset)
+      // Cold boot (power loss or hard reset). Start off active.
       Serial.println("Cold boot");
       g_bActive = true;
       g_lastActive = millis();
 
-      g_adcAdjustment = g_prefs.getFloat("adcAdjustment", 1.0);
-
-      g_batteries[BAT1].begin("Engine", BAT1_ADC_PIN, DIVIDER_R1, DIVIDER_R2,
-                              g_adcAdjustment,
-                              g_bat1History, HISTORY_NUM_DATA_POINTS,
-                              HISTORY_AVG_INTERVAL_MS / INTER_SAMPLE_INTERVAL_MS);
-      g_batteries[BAT2].begin("House",  BAT2_ADC_PIN, DIVIDER_R1, DIVIDER_R2,
-                              g_adcAdjustment,
-                              g_bat2History, HISTORY_NUM_DATA_POINTS,
-                              HISTORY_AVG_INTERVAL_MS / INTER_SAMPLE_INTERVAL_MS);
+      g_rtcHistory[BAT1].begin(g_rtcData[BAT1], HISTORY_NUM_DATA_POINTS);
+      g_rtcHistory[BAT2].begin(g_rtcData[BAT2], HISTORY_NUM_DATA_POINTS);
   }
   else if (wakeup_reason == ESP_SLEEP_WAKEUP_EXT1) {
-      // Button press. We're active but batteries don't need to be initialized.
+      // Button press. Now we're active.
       Serial.println("Wake from buttonpress");
       g_bActive = true;
       g_lastActive = millis();
   }
   else {
-      // ESP_SLEEP_WAKEUP_TIMER
+      // Timer wakeup. Still idle.
       Serial.println("Wake from timer");
       g_bActive = false;
   }
@@ -306,6 +324,37 @@ void setup(void) {
   g_histOptions.bShowStats = g_prefs.getBool("showStats", true);
   g_histOptions.bDynamicScale = g_prefs.getBool("dynamicScale", true);
   g_histOptions.range = (HistRange)g_prefs.getInt("range", 0);
+  g_adcAdjustment = g_prefs.getFloat("adcAdjustment", 1.0);
+
+  // Prepare flash filesystem
+  fs::FS* fs = &LittleFS;
+  if (!LittleFS.begin(true)) {
+      Serial.println("LittleFS Mount Failed");
+      fs = nullptr;
+  }
+
+  // Load saved history from flash and RTC memory
+  g_batteryExtHist[BAT1].begin(0, &g_rtcHistory[BAT1],
+                               &g_prefs, fs, BAT1_EXT_HIST_PATH);
+  g_batteryExtHist[BAT2].begin(1, &g_rtcHistory[BAT2],
+                               &g_prefs, fs, BAT2_EXT_HIST_PATH);
+
+  // ADC setup
+  pinMode(BAT1_ADC_PIN, INPUT);
+  pinMode(BAT2_ADC_PIN, INPUT);
+
+  // Use 11dB ADC attenuation to read 0-3100mV input
+  analogSetAttenuation(ADC_11db);
+
+  g_batteries[BAT1].begin("Engine", BAT1_ADC_PIN, DIVIDER_R1, DIVIDER_R2,
+                          g_adcAdjustment,
+                          HISTORY_AVG_INTERVAL_MS / INTER_SAMPLE_INTERVAL_MS,
+                          &g_batteryExtHist[BAT1]);
+  g_batteries[BAT2].begin("House",  BAT2_ADC_PIN, DIVIDER_R1, DIVIDER_R2,
+                          g_adcAdjustment,
+                          HISTORY_AVG_INTERVAL_MS / INTER_SAMPLE_INTERVAL_MS,
+                          &g_batteryExtHist[BAT2]);
+
 
   // Deconfigure RTC config of button pins during deep sleep
   rtc_gpio_deinit(BUTTON_D1_PIN);
@@ -321,13 +370,6 @@ void setup(void) {
   // First sample is after initial averaging period. If we're active, subsequent
   // period is set to HISTORY_SAMPLE_INTERVAL_SECS.
   g_historyTimer.begin(&g_historyTimer, HISTORY_AVG_INTERVAL_MS, updateCallback);
-
-  // ADC setup
-  pinMode(BAT1_ADC_PIN, INPUT);
-  pinMode(BAT2_ADC_PIN, INPUT);
-
-  // Use 11dB ADC attenuation to read 0-3100mV input
-  analogSetAttenuation(ADC_11db);
 
   if (g_bActive) {
       initDisplay();
@@ -387,7 +429,7 @@ void handleButtonEvents(Event e) {
             break;
 
         case PAGE_BAT1_HISTORY:
-            // D0 cyles through history ranges (3hrs/24hrs/2days)
+            // D0 cyles through history ranges.
             // D1 option menu (display stats on/off, dynamic scale on/off, back).
             // D2 cycles to next page
             switch (e) {
@@ -398,6 +440,7 @@ void handleButtonEvents(Event e) {
                             r = 0;
                         }
                         g_histOptions.range = (HistRange)r;
+                        g_prefs.putInt("range", r);
                     }
                     break;
 
@@ -416,7 +459,7 @@ void handleButtonEvents(Event e) {
             break;
 
         case PAGE_BAT2_HISTORY:
-            // D0 cyles through history ranges (3hrs/24hrs/2days)
+            // D0 cyles through history ranges
             // D1 option menu (display stats on/off, dynamic scale on/off, back).
             // D2 cycles to next page
             switch (e) {
@@ -471,6 +514,11 @@ void handleButtonEvents(Event e) {
 
                         case OPT_DYNAMIC_SCALE:
                             g_histOptions.bDynamicScale = !g_histOptions.bDynamicScale;
+                            break;
+
+                        case OPT_CLEAR_HIST:
+                            g_batteryExtHist[BAT1].reset();
+                            g_batteryExtHist[BAT2].reset();
                             break;
 
                         case OPT_BACK:
@@ -563,9 +611,8 @@ bool updateCallback(void* user) {
     Serial.println(g_batteries[BAT2].getVoltage(), 2);
 #endif
 
-    // Update the voltage history with the latest average.
-    g_batteries[BAT1].updateVoltageHistory();
-    g_batteries[BAT2].updateVoltageHistory();
+    g_batteryExtHist[BAT1].addSample(g_batteries[BAT1].getVoltage());
+    g_batteryExtHist[BAT2].addSample(g_batteries[BAT2].getVoltage());
 
     uint32_t t = millis();
 
@@ -763,41 +810,41 @@ void drawHistoryCallback(void* user, const float* data, size_t len, size_t offse
 void displayHistory(const Battery* bat) {
     struct HistStatsContext hist_stats;
     struct HistWindowContext hist_window;
-    const AvgDataHistory<float>* hist = bat->getHistory();
+    const ExtHistory* hist = bat->getHistory();
 
     g_tft.setTextWrap(false);
     g_tft.fillScreen(ST77XX_BLACK);
 
-    double cv = hist->getLatestData();
+    double cv = bat->getVoltage();
     double psoc = bat->calcPSoC(cv);
     uint16_t color = getPSoCColor(psoc);
 
     // Figure out what range of history data we are displaying.
     size_t minOffset = 0;
-    size_t maxOffset = hist->getSize();
+    size_t maxOffset = hist->m_size;
     int stepx = 10;
 
     switch (g_histOptions.range) {
-        case RANGE_3_HRS:
-            minOffset = maxOffset - (12 * 3);
+        case RANGE_12_HRS:
+            minOffset = maxOffset - (12 * 12);
             stepx = DISPLAY_WIDTH / 12;
             break;
 
-        case RANGE_24_HRS:
-            minOffset = maxOffset - (12 * 24);
-            stepx = DISPLAY_WIDTH / 24;
+        case RANGE_2_DAYS:
+            minOffset = maxOffset - (12 * (2 * 24));
+            stepx = DISPLAY_WIDTH / 12;
             break;
 
-        case RANGE_2_DAYS:
+        case RANGE_16_DAYS:
             minOffset = 0;
-            stepx = DISPLAY_WIDTH / 8;
+            stepx = DISPLAY_WIDTH / 16;
             break;
     }
 
     // Calculate history statistics.
     hist_stats.min_x = minOffset;
     hist_stats.max_x = maxOffset;
-    hist_stats.size = hist->getSize();
+    hist_stats.size = hist->m_size;
     hist->forEachData(statsHistoryCallback, &hist_stats);
 
     // Figure out what vertical range of data we are displaying.
@@ -887,7 +934,7 @@ void displayHistory(const Battery* bat) {
 void drawBatterySummary(const Battery* bat, int16_t y0) {
     char buffer[32];
 
-    double v = bat->getHistory()->getLatestData();
+    double v = bat->getVoltage();
     double psoc = bat->calcPSoC(v);
     uint16_t color = getPSoCColor(psoc);
     int16_t w = round(DISPLAY_WIDTH * psoc / 100.0);
@@ -922,6 +969,7 @@ void displayOptions() {
     g_tft.println(g_histOptions.bShowStats ? "Yes" : "No");
     g_tft.print(g_optionsTable[OPT_DYNAMIC_SCALE]);
     g_tft.println(g_histOptions.bDynamicScale ? "Yes" : "No");
+    g_tft.println(g_optionsTable[OPT_CLEAR_HIST]);
     g_tft.print(g_optionsTable[OPT_BACK]);
 
     int16_t y = 16 * g_histOptions.cursor;
@@ -940,7 +988,7 @@ void displayCalibration() {
     g_tft.println("Calibration:");
 
     g_tft.setTextSize(3);
-    float v = g_batteries[BAT2].getHistory()->getLatestData();
+    float v = g_batteries[BAT2].getVoltage();
     snprintf(buffer, sizeof(buffer), "%s %.2fV", g_batteries[BAT2].getName(), v);
     drawJustifiedText(buffer, DISPLAY_WIDTH / 2,  40, TXT_CENTERED);
 

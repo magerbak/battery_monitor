@@ -27,43 +27,20 @@ const Battery::PSoC Battery::m_psocTable[] = {
 
 
 void Battery::begin(const char* name, int pin, float r1, float r2, float adcAdjustment,
-                    float* histData, size_t histLen, int avgCount) {
+                    int avgCount, ExtHistory* history) {
     m_pName = name;
-    m_pin = pin;
+    m_history = history;
 
-    m_adcAdjustment = adcAdjustment;
-    m_scaleFactor = (r1 + r2) / r2;
-
-    m_history.begin(histData, histLen, avgCount);
+    m_adc.begin(pin, r1, r2, adcAdjustment, avgCount);
 }
 
 bool Battery::updateVoltageData() {
-    float v = readVoltage();
-    
-    bool bDone = m_history.updateData(v);
+    bool bDone = m_adc.updateVoltage();
     if (bDone) {
         //Serial.println(getName());
-        //Serial.println(m_history.getLatestData(), 3);
+        //Serial.println(m_adc.getVoltage(), 3);
     }
     return bDone;
-}
-
-void Battery::updateVoltageHistory() {
-    m_history.updateHistory();
-}
-
-float Battery::readVoltage() {
-    // See https://docs.espressif.com/projects/arduino-esp32/en/latest/api/adc.html
-
-    // Read ADC and convert to calibrated voltage.
-    float adcVoltage = (float)analogReadMilliVolts(m_pin) * m_adcAdjustment / 1000.0;
-    //Serial.println(adcVoltage, 3);
-
-    // Based on resistor divider, calculate the battery voltage.
-    float batteryVoltage = adcVoltage * m_scaleFactor;
-    //Serial.println(batteryVoltage, 2);
-
-    return batteryVoltage;
 }
 
 float Battery::calcPSoC(float voltage) {
