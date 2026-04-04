@@ -66,7 +66,7 @@
 #include "ext_history.h"
 
 
-#define VERSION_NUM         "v1.1.0"
+#define VERSION_NUM         "v1.1.1"
 
 #define BUTTON_D0_PIN       GPIO_NUM_0
 #define BUTTON_D1_PIN       GPIO_NUM_1

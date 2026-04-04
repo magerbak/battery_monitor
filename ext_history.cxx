@@ -115,8 +115,6 @@ bool ExtHistory::loadFlashSegments()
                 m_bWrapped = true;
             }
 
-            Serial.println(fn);
-            Serial.println(offset);
             size_t l = file.read((uint8_t *)&m_data[offset], n);
             if (l != n) {
                 Serial.println("Failed to load file");
@@ -144,14 +142,12 @@ bool ExtHistory::saveSegment()
     if (rc >= (int)sizeof(fn)) {
         return false;
     }
-    Serial.println(fn);
     File file = m_fs->open(fn, "w");
     if (!file) {
         Serial.println("Failed to open file to write");
         return false;
     }
 
-    Serial.println("Writing ");
     size_t l = file.write((const uint8_t*)&m_data[offset], n);
     if (l != n) {
         Serial.println("Failed to write to file");
