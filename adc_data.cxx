@@ -23,11 +23,9 @@ float AdcData::readVoltage() {
 
     // Read ADC and convert to calibrated voltage.
     float adcVoltage = (float)analogReadMilliVolts(m_pin) * m_adcAdjustment / 1000.0;
-    //Serial.println(adcVoltage, 3);
 
     // Based on resistor divider, calculate the AdcData voltage.
     float AdcDataVoltage = adcVoltage * m_scaleFactor;
-    //Serial.println(AdcDataVoltage, 2);
 
     return AdcDataVoltage;
 }

@@ -71,8 +71,6 @@ void ExtHistory::nextSegment()
     char name[16];
 
     m_idx = (m_idx + 1) % NUM_SEGMENTS;
-    Serial.print("idx ");
-    Serial.println(m_idx);
 
     snprintf(name, sizeof(name), "histIdx%d", m_instance);
     m_prefs->putUInt(name, m_idx);
