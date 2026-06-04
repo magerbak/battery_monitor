@@ -15,23 +15,24 @@ public:
     ExtHistory() = default;
     ~ExtHistory() = default;
 
-    static const unsigned int NUM_SEGMENTS = 16;
+    // MA! FIXME: This should be passed in and stored as a member variable
+    static const unsigned int NUM_SEGMENTS = 24 * 4;
 
     void reset() override;
 
-    bool begin(int instance, DataHistory* rtc, Preferences* prefs, fs::FS* fs, const char* filePath);
+    bool begin(int instance, DataHistory* rtc, Preferences* prefs, fs::FS* fs, const char* path);
     bool addSample(float val) override;
 
 private:
     void nextSegment();
-    bool loadFlashSegments();
-    bool saveSegment();
-    bool clearFlashSegments();
-    void loadRtcSegment();
+    bool flashLoad();
+    bool flashSave();
+    bool flashClear();
+    void rtcLoad();
 
     int m_instance = 0;
     Preferences* m_prefs = nullptr;
-    const char* m_filePath = nullptr;
+    const char* m_path = nullptr;
     fs::FS* m_fs = nullptr;
 
     // Current segment index being recorded.

@@ -1,5 +1,5 @@
 /**************************************************************************
-  Records a 16 day voltage history of two batteries.
+  Records a 4 day voltage history of two batteries.
 
   Implemented for the Adafruit ESP32-S3 Reverse TFT Feather
     ----> https://www.adafruit.com/products/5691
@@ -10,7 +10,7 @@
    * D2 button cycles between summary page and voltage history for battery 1 and 2.
 
   In voltage history pages:
-   * D0 button cycles between 12hr, 48hr and 16 day history.
+   * D0 button cycles between 12hr, 48hr and 4 day history.
    * D1 button enters options menu.
    * D2 button cycles between summary page and voltage history for battery 1 and 2.
 
@@ -25,21 +25,23 @@
   to deep sleep. A D1 or D2 button press will return the device to active mode
   (enable the display).
 
-  History is saved in 16 segments (each corresponding to 24hrs), each
-  of which is saved in flash. The current segment is also written to RTC memory
-  that is preserved between sleep cycles. When waking from deep sleep, the
-  history is loaded from flash and then the RTC history is copied into the
-  current segment. An interruption of battery power therefore results in up to
-  one segment of history being lost.
+  History is saved in 1 hour segments, each of which is saved in flash. The
+  current segment is also written to RTC memory that is preserved between sleep
+  cycles. When waking from deep sleep, the history is loaded from flash and then
+  the RTC history is copied into the current segment. An interruption of battery
+  power therefore results in up to one segment of history being lost.
 
   With a nominal 12V battery, including a 12V to 5V converter:
   * Current draw when active (display on) is 37.3mA (0.485 W).
-  * Current draw when awake and idle is 26.5mA (0.345 W).
+  * Current draw when awake and idle (display off) is 26.5mA (0.345 W).
   * Current draw in deep sleep is 0.25mA (0.00325 W).
 
-  Wake time is approx. 3.5s every HISTORY_SAMPLE_INTERVAL_SECS. At 5mins, the awake
-  ratio is 1.17%, so average current draw is:
-    0.0117*37.3 + (1-0.0117)*0.25 = 0.682mA (8.87mW)
+  Wake time is approx. 3.5s every HISTORY_SAMPLE_INTERVAL_SECS. At 1 min, the awake
+  ratio is 5.83%, so average current draw is:
+    0.0583*37.3 + (1-0.0583)*0.25 = 2.41mA (31mW)
+
+  Average current draw could be reduced by 80% by changing
+  HISTORY_SAMPLE_INTERVAL_SECS to every 5mins.
 
   Deep sleep power could possibly be improved by shutting down more peripherals.
   It's not immediately obvious how much already gets disabled by default.
@@ -66,7 +68,7 @@
 #include "ext_history.h"
 
 
-#define VERSION_NUM         "v1.1.1"
+#define VERSION_NUM         "v1.2.0"
 
 #define BUTTON_D0_PIN       GPIO_NUM_0
 #define BUTTON_D1_PIN       GPIO_NUM_1
@@ -75,29 +77,39 @@
 #define BAT1_ADC_PIN        A0
 #define BAT2_ADC_PIN        A1
 
-// For each sample in history we average data samples every INTER_SAMPLE_INTERVAL_MS
-// for HISTORY_AVG_INTERVAL_MS.
-#define INTER_SAMPLE_INTERVAL_MS    100
+// For each sample in history we average data readings every UPDATE_INTERVAL_MS
+// over HISTORY_AVG_INTERVAL_MS.
+#define UPDATE_INTERVAL_MS          100
 #define HISTORY_AVG_INTERVAL_MS     2500
 
-// Every HISTORY_SAMPLE_INTERVAL_SECS we record an averaged sample. When idle,
-// we expect to sleep for the balance of this interval.
+// Duration of each segment of history (time between saving to flash).
+#define HISTORY_SEGMENT_INTERVAL_SECS   (60 * 60)
+
+// Interval of recorded samples (also how often we wake up from deep sleep). We
+// use a shorter interval for testing (see below).
+#define HISTORY_SAMPLE_INTERVAL_SECS_PROD   (1 * 60)
+#define HISTORY_SAMPLE_INTERVAL_SECS_TEST   (15)
+
+// Num of samples per segment of history. This consumes
+// HISTORY_NUM_DATA_POINTS * NUM_BATTERIES * sizeof(float) bytes of the 8kB
+// RTC memory (plus a few bytes of fixed overhead).
+#define HISTORY_NUM_DATA_POINTS         (HISTORY_SEGMENT_INTERVAL_SECS / \
+                                         HISTORY_SAMPLE_INTERVAL_SECS_PROD)
+
+// Every HISTORY_SAMPLE_INTERVAL_SECS we record an averaged sample.
+// Idle timeout is how long display stays on after last button press. When idle,
+// we return to deep sleep after recording each sample.
 #ifdef TESTING
-    // For testing we pretend time has sped up 20x
-    #define HISTORY_SAMPLE_INTERVAL_SECS    (15)
+    // For testing we pretend time has sped up but continue to use the same
+    // segment size.
+    #define HISTORY_SAMPLE_INTERVAL_SECS    HISTORY_SAMPLE_INTERVAL_SECS_TEST
     #define IDLE_TIMEOUT_MS                 (2 * 60 * 1000)
 #else
-    #define HISTORY_SAMPLE_INTERVAL_SECS    (5 * 60)
+    #define HISTORY_SAMPLE_INTERVAL_SECS    HISTORY_SAMPLE_INTERVAL_SECS_PROD
     #define IDLE_TIMEOUT_MS                 (15 * 60 * 1000)
 #endif
 
-// Num of samples per segment of history.
-// 24hrs, assuming sampling every 5mins. This consumes 2304 bytes of the 8kB
-// RTC memory (plus few bytes of fixed overhead).
-#define HISTORY_NUM_DATA_POINTS         (24 * 12)
-
 // Total number of samples that can be displayed. Includes samples stored in flash.
-// 16 days, assuming sampling every 5mins.
 #define EXT_HISTORY_NUM_DATA_POINTS     (ExtHistory::NUM_SEGMENTS * HISTORY_NUM_DATA_POINTS)
 
 #define BAT1_EXT_HIST_PATH              "/bat1hist"
@@ -144,7 +156,7 @@
 //
 // Adjust resistor values to measured resistance of specific resistors in your circuit.
 // Or you can just rely on the user-calibration setting to compensate.
-#define DIVIDER_R1      (100 + 101)
+#define DIVIDER_R1      (100.0 + 101.0)
 #define DIVIDER_R2      46.3
 
 #define SERIAL_INIT_DELAY_MS    1000
@@ -189,7 +201,7 @@ enum Options {
 enum HistRange {
     RANGE_12_HRS,
     RANGE_2_DAYS,
-    RANGE_16_DAYS,
+    RANGE_4_DAYS,
     NUM_RANGE_OPTIONS
 };
 
@@ -248,7 +260,7 @@ const char* g_optionsTable[OPT_BACK + 1] = {
 const char* g_rangeOptionsTable[NUM_RANGE_OPTIONS] = {
     "12hrs",
     "2days",
-    "16days",
+    "4days",
 };
 
 // Use dedicated hardware SPI pins
@@ -260,7 +272,7 @@ float g_prevAdcAdjustment = 1.0;
 bool g_calConfirmation = false;
 unsigned int g_histIndex = 0;
 
-SimpleTimer g_samplingTimer;
+SimpleTimer g_updateTimer;
 SimpleTimer g_historyTimer;
 
 // UI buttons. On the Adafruit ESP32-S3 reverse TFT feather, these are on pins D0, D1 and D2.
@@ -348,11 +360,11 @@ void setup(void) {
 
   g_batteries[BAT1].begin("Engine", BAT1_ADC_PIN, DIVIDER_R1, DIVIDER_R2,
                           g_adcAdjustment,
-                          HISTORY_AVG_INTERVAL_MS / INTER_SAMPLE_INTERVAL_MS,
+                          HISTORY_AVG_INTERVAL_MS / UPDATE_INTERVAL_MS,
                           &g_batteryExtHist[BAT1]);
   g_batteries[BAT2].begin("House",  BAT2_ADC_PIN, DIVIDER_R1, DIVIDER_R2,
                           g_adcAdjustment,
-                          HISTORY_AVG_INTERVAL_MS / INTER_SAMPLE_INTERVAL_MS,
+                          HISTORY_AVG_INTERVAL_MS / UPDATE_INTERVAL_MS,
                           &g_batteryExtHist[BAT2]);
 
 
@@ -364,12 +376,12 @@ void setup(void) {
   g_buttonD1.begin();
   g_buttonD2.begin();
 
-  // We sample each battery every INTER_SAMPLE_INTERVAL_MS.
-  g_samplingTimer.begin(nullptr, INTER_SAMPLE_INTERVAL_MS, samplingCallback);
+  // We read battery voltages for averaging every INTER_SAMPLE_INTERVAL_MS.
+  g_updateTimer.begin(nullptr, UPDATE_INTERVAL_MS, updateCallback);
 
   // First sample is after initial averaging period. If we're active, subsequent
   // period is set to HISTORY_SAMPLE_INTERVAL_SECS.
-  g_historyTimer.begin(&g_historyTimer, HISTORY_AVG_INTERVAL_MS, updateCallback);
+  g_historyTimer.begin(&g_historyTimer, HISTORY_AVG_INTERVAL_MS, historyCallback);
 
   if (g_bActive) {
       initDisplay();
@@ -380,7 +392,7 @@ void loop() {
     uint32_t t = millis();
 
     // Drive our timers
-    g_samplingTimer.tick(t);
+    g_updateTimer.tick(t);
     g_historyTimer.tick(t);
 
     // Poll buttons and drive UI
@@ -583,7 +595,7 @@ void handleButtonEvents(Event e) {
 }
 
 
-bool samplingCallback(void* user) {
+bool updateCallback(void* user) {
     (void)user;
 
     bool bDone1 = g_batteries[BAT1].updateVoltageData();
@@ -602,7 +614,7 @@ bool samplingCallback(void* user) {
     return true;
 }
 
-bool updateCallback(void* user) {
+bool historyCallback(void* user) {
 
     SimpleTimer* pTimer = (SimpleTimer*)user;
 
@@ -826,18 +838,20 @@ void displayHistory(const Battery* bat) {
 
     switch (g_histOptions.range) {
         case RANGE_12_HRS:
-            minOffset = maxOffset - (12 * 12);
+            // Assuming here that a segment is 1hr
+            minOffset = maxOffset - (12 * HISTORY_NUM_DATA_POINTS);
             stepx = DISPLAY_WIDTH / 12;
             break;
 
         case RANGE_2_DAYS:
-            minOffset = maxOffset - (12 * (2 * 24));
+            // Assuming here that a segment is 1hr
+            minOffset = maxOffset - ((2 * 24) * HISTORY_NUM_DATA_POINTS);
             stepx = DISPLAY_WIDTH / 12;
             break;
 
-        case RANGE_16_DAYS:
+        case RANGE_4_DAYS:
             minOffset = 0;
-            stepx = DISPLAY_WIDTH / 16;
+            stepx = DISPLAY_WIDTH / 8;
             break;
     }
 
